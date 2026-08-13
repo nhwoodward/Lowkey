@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="#quick-start"><img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-111111?style=flat-square" /></a>
-  <a href="#what-it-is"><img alt="4 GB of RAM and up" src="https://img.shields.io/badge/RAM-4%20GB%2B-111111?style=flat-square" /></a>
+  <a href="#what-it-is"><img alt="8 GB of RAM and up" src="https://img.shields.io/badge/RAM-4%20GB%2B-111111?style=flat-square" /></a>
   <a href="#privacy"><img alt="Engine is local Whisper" src="https://img.shields.io/badge/engine-Whisper-111111?style=flat-square" /></a>
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" /></a>
 </p>
@@ -26,7 +26,7 @@ Lowkey flips that.
 
 Hold **Right Command**, talk, let go. Whisper **small** runs on the same Mac through `whisper-server` bound to `127.0.0.1`. The words land wherever the cursor is. There is no account, no analytics, and no network call except that local server.
 
-It is built for **low-memory Macs** on purpose: a ~466 MB model, four decode threads, and no leftover decoder context from the last utterance. That is why it stays quick on 4 GB machines instead of asking you to buy more RAM.
+It is built for **low-memory Macs** on purpose: a ~466 MB model, four decode threads, and no leftover decoder context from the last utterance. That is why it stays quick on 8 GB machines instead of asking you to buy more RAM.
 
 <p align="center">
   <img alt="Lowkey dictation window" src="docs/images/window.png" width="86%" />
@@ -53,7 +53,7 @@ It is built for **low-memory Macs** on purpose: a ~466 MB model, four decode thr
 ### Requirements
 
 - macOS 14 or later
-- About 4 GB of RAM or more
+- About 8 GB of RAM or more
 - [Homebrew](https://brew.sh) and the Xcode Command Line Tools
 
 The first run downloads `ggml-small.bin` (~466 MB) and builds the app.
