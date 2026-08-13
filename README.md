@@ -4,6 +4,8 @@ Local-only dictation for macOS. Hold Right Command, speak, release. Whisper
 small runs on the same Mac through `whisper-server` bound to `127.0.0.1`.
 No account. No analytics. No cloud.
 
+Licensed under the [MIT License](LICENSE).
+
 ## Requirements
 
 - macOS 14 or later
