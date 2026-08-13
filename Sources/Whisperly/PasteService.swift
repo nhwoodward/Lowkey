@@ -62,22 +62,32 @@ enum PasteService {
             let destination = target ?? DispatchQueue.main.sync { PasteTarget.capture() }
             log("insert len=\(text.count) app=\(destination.localizedName) pane=\(destination.weztermPaneID ?? "-") trusted=\(isTrusted()) clipboard=\(clipboard.rawValue)")
 
+            // Always park the transcript on the clipboard first. That is the
+            // failsafe when no field is focused or WezTerm swallows send-text.
+            let focus = DispatchQueue.main.sync { FocusedField.probe() }
+            let previous = DispatchQueue.main.sync { writeClipboard(text) }
+
             var outcome = PasteOutcome.unknown
             if destination.isWezTerm {
                 let pane = destination.weztermPaneID ?? focusedWeztermPane()
                 if let pane, sendViaWezterm(text, pane: pane) {
                     log("wezterm send-text pane=\(pane)")
-                    DispatchQueue.main.async { completion?(.succeeded) }
+                    // CLI 0 only means the pane accepted bytes, not that the
+                    // user had a field. Keep the clipboard unless they chose Never.
+                    finishOnMain(previous, clipboard: clipboard, expected: text, outcome: .unknown, completion: completion)
                     return
                 }
                 log("wezterm send-text failed, falling through to keystroke")
-                outcome = .failed
             }
 
-            let before = DispatchQueue.main.sync { FocusedField.value() }
-            let previous = DispatchQueue.main.sync { writeClipboard(text) }
             Thread.sleep(forTimeInterval: prePasteDelay)
             waitForModifiersToClear()
+
+            if !focus.hasFocus {
+                log("no focused field, leaving clipboard")
+                finishOnMain(previous, clipboard: clipboard, expected: text, outcome: .failed, completion: completion)
+                return
+            }
 
             // VoiceInk default: CGEvent Cmd+V on the hid tap, only when trusted.
             // AppleScript reports success on macOS 27 without the keystroke landing
@@ -85,18 +95,14 @@ enum PasteService {
             if isTrusted() {
                 DispatchQueue.main.sync { pasteFromClipboardVoiceInk() }
                 log("voiceink hid tap posted")
-                outcome = detectKeystrokeOutcome(before: before, text: text, posted: true)
+                outcome = detectKeystrokeOutcome(before: focus.value, text: text)
             } else {
                 let scriptOK = DispatchQueue.main.sync { pasteUsingAppleScript() }
                 log("applescript=\(scriptOK) trusted=false")
-                outcome = scriptOK ? detectKeystrokeOutcome(before: before, text: text, posted: false) : .failed
+                outcome = scriptOK ? detectKeystrokeOutcome(before: focus.value, text: text) : .failed
             }
 
-            let restore = shouldRestore(clipboard, outcome: outcome)
-            log("paste outcome=\(outcome.rawValue) restore=\(restore)")
-            DispatchQueue.main.async {
-                finishRestore(previous, enabled: restore, expected: text, completion: completion, outcome: outcome)
-            }
+            finishOnMain(previous, clipboard: clipboard, expected: text, outcome: outcome, completion: completion)
         }
     }
 
@@ -117,17 +123,31 @@ enum PasteService {
         }
     }
 
-    private static func detectKeystrokeOutcome(before: String?, text: String, posted: Bool) -> PasteOutcome {
+    private static func detectKeystrokeOutcome(before: String?, text: String) -> PasteOutcome {
         Thread.sleep(forTimeInterval: 0.08)
-        let after = DispatchQueue.main.sync { FocusedField.value() }
-        if let after {
-            if after.contains(text) { return .succeeded }
-            if let before, after.count > before.count { return .succeeded }
+        let after = DispatchQueue.main.sync { FocusedField.probe() }
+        if !after.hasFocus { return .failed }
+        if let value = after.value {
+            if value.contains(text) { return .succeeded }
+            if let before, value.count > before.count { return .succeeded }
             return .failed
         }
-        // Chromium often has no AX value. A posted hid tap is the VoiceInk
-        // path and usually landed; AppleScript is known to lie.
-        return posted ? .succeeded : .unknown
+        // Focused but unreadable (typical Chromium). Do not pretend it worked.
+        return .unknown
+    }
+
+    private static func finishOnMain(
+        _ previous: String?,
+        clipboard: ClipboardBehavior,
+        expected: String,
+        outcome: PasteOutcome,
+        completion: ((PasteOutcome) -> Void)?
+    ) {
+        let restore = shouldRestore(clipboard, outcome: outcome)
+        log("paste outcome=\(outcome.rawValue) restore=\(restore)")
+        DispatchQueue.main.async {
+            finishRestore(previous, enabled: restore, expected: expected, completion: completion, outcome: outcome)
+        }
     }
 
     static func focusedWeztermPane() -> String? {
@@ -262,7 +282,12 @@ enum PasteService {
     }
 
     private enum FocusedField {
-        static func value() -> String? {
+        struct Probe {
+            var hasFocus: Bool
+            var value: String?
+        }
+
+        static func probe() -> Probe {
             let system = AXUIElementCreateSystemWide()
             var focused: CFTypeRef?
             guard AXUIElementCopyAttributeValue(
@@ -270,16 +295,28 @@ enum PasteService {
                 kAXFocusedUIElementAttribute as CFString,
                 &focused
             ) == .success, let focused else {
-                return nil
+                return Probe(hasFocus: false, value: nil)
             }
             let element = focused as! AXUIElement
+            var role: CFTypeRef?
+            _ = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+            let roleName = role as? String ?? ""
+            if Self.nonEditableRoles.contains(roleName) {
+                return Probe(hasFocus: false, value: nil)
+            }
             var value: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success,
                let text = value as? String {
-                return text
+                return Probe(hasFocus: true, value: text)
             }
-            return nil
+            return Probe(hasFocus: true, value: nil)
         }
+
+        private static let nonEditableRoles: Set<String> = [
+            "AXWindow", "AXApplication", "AXToolbar", "AXMenuBar", "AXMenu",
+            "AXMenuItem", "AXButton", "AXImage", "AXSplitter", "AXScrollBar",
+            "AXTabGroup", "AXRadioButton", "AXCheckBox", "AXSlider",
+        ]
     }
 
     static func log(_ line: String) {
