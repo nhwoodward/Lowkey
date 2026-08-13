@@ -5,7 +5,7 @@ enum MediaPause {
     // Ordering lives on this serial queue so a resume enqueued while a pause
     // is still running always sees the final paused list. The AppleScripts
     // themselves run on the main thread; NSAppleScript is not safe elsewhere.
-    private static let queue = DispatchQueue(label: "app.whisperly.media", qos: .userInitiated)
+    private static let queue = DispatchQueue(label: "app.lowkey.media", qos: .userInitiated)
     private static var paused: [String] = []
 
     static func pauseIfNeeded(enabled: Bool) {

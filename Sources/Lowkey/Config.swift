@@ -100,8 +100,14 @@ struct Config: Codable {
     static let loopbackHost = "127.0.0.1"
 
     static var supportDirectory: URL {
-        let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Whisperly", isDirectory: true)
+        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let url = root.appendingPathComponent("Lowkey", isDirectory: true)
+        let legacy = root.appendingPathComponent("Whisperly", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: url.path),
+           FileManager.default.fileExists(atPath: legacy.path) {
+            try? FileManager.default.moveItem(at: legacy, to: url)
+            try? FileManager.default.removeItem(at: url.appendingPathComponent("signing", isDirectory: true))
+        }
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
         return url

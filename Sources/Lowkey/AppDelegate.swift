@@ -293,7 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func buildStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
-            button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Whisperly")
+            button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Lowkey")
             button.image?.isTemplate = true
         }
         let menu = NSMenu()
@@ -312,7 +312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let menu = statusItem?.menu else { return }
         menu.removeAllItems()
         let status = engine.isReady ? "Engine ready" : "Engine starting"
-        let header = NSMenuItem(title: "Whisperly", action: nil, keyEquivalent: "")
+        let header = NSMenuItem(title: "Lowkey", action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
         menu.addItem(withTitle: "Hold \(config.hotkey.title) to dictate", action: nil, keyEquivalent: "")
@@ -325,13 +325,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(NSMenuItem(title: "Relaunch", action: #selector(relaunch), keyEquivalent: ""))
         }
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Open Whisperly", action: #selector(openMain), keyEquivalent: "o"))
+        menu.addItem(NSMenuItem(title: "Open Lowkey", action: #selector(openMain), keyEquivalent: "o"))
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
         let paste = NSMenuItem(title: "Paste last transcript", action: #selector(pasteLast), keyEquivalent: "")
         paste.isEnabled = !lastTranscript.isEmpty
         menu.addItem(paste)
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit Whisperly", action: #selector(quit), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "Quit Lowkey", action: #selector(quit), keyEquivalent: "q"))
         menu.items.forEach { $0.target = self }
     }
 
@@ -458,8 +458,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         PasteService.openAccessibilitySettings()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             let alert = NSAlert()
-            alert.messageText = "Turn on Accessibility for Whisperly"
-            alert.informativeText = "In Device Control and Data Access, enable Whisperly, then relaunch.\n\nIf the switch is already on and paste still fails, remove Whisperly, add ~/Applications/Whisperly.app again, turn it on, and relaunch. macOS sometimes keeps a stale code hash from an older build."
+            alert.messageText = "Turn on Accessibility for Lowkey"
+            alert.informativeText = "In Device Control and Data Access, enable Lowkey, then relaunch.\n\nIf the switch is already on and paste still fails, remove Lowkey, add ~/Applications/Lowkey.app again, turn it on, and relaunch. macOS sometimes keeps a stale code hash from an older build."
             alert.addButton(withTitle: "Relaunch now")
             alert.addButton(withTitle: "Later")
             NSApp.activate(ignoringOtherApps: true)
@@ -486,18 +486,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         AVCaptureDevice.requestAccess(for: .audio) { _ in }
     }
 
-    // Dev-only hook: WHISPERLY_UI=main|settings|flow|fail drives UI states
+    // Dev-only hook: LOWKEY_UI=main|settings|flow|fail drives UI states
     // without a mic or a menu click, for screenshots and animation checks.
     private func setupDebugUI() {
         #if !DEBUG
         return
         #else
-        switch ProcessInfo.processInfo.environment["WHISPERLY_APPEARANCE"] {
+        switch ProcessInfo.processInfo.environment["LOWKEY_APPEARANCE"] {
         case "light": NSApp.appearance = NSAppearance(named: .aqua)
         case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
         default: break
         }
-        switch ProcessInfo.processInfo.environment["WHISPERLY_UI"] {
+        switch ProcessInfo.processInfo.environment["LOWKEY_UI"] {
         case "main":
             openMain()
         case "settings":

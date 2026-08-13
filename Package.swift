@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "Whisperly",
+    name: "Lowkey",
     platforms: [.macOS(.v14)],
     targets: [
         .executableTarget(
-            name: "Whisperly",
-            path: "Sources/Whisperly",
+            name: "Lowkey",
+            path: "Sources/Lowkey",
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("AVFoundation"),

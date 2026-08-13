@@ -3,7 +3,7 @@ import Foundation
 
 final class Engine {
     private var process: Process?
-    private let queue = DispatchQueue(label: "app.whisperly.engine")
+    private let queue = DispatchQueue(label: "app.lowkey.engine")
     private var stopRequested = false
     private(set) var isReady = false
     private(set) var lastError: String?

@@ -143,13 +143,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         addSection("FEATURES")
         addToggle("speaker.wave.2.fill", NSColor.systemBlue, "Dictation sound", "Play a sound when you start and stop recording", draft.playSounds, #selector(toggleSounds))
         addToggle("rectangle.bottomthird.inset.filled", NSColor.systemPurple, "Floating widget", "Show the Flow Bar when you are not dictating", draft.showBarAlways, #selector(toggleBar))
-        addToggle("dock.rectangle", NSColor.systemGreen, "Hide from dock", "Keep Whisperly in the menu bar only", draft.hideFromDock, #selector(toggleDock))
+        addToggle("dock.rectangle", NSColor.systemGreen, "Hide from dock", "Keep Lowkey in the menu bar only", draft.hideFromDock, #selector(toggleDock))
         addSection("SYSTEM")
         addMenuRow("circle.lefthalf.filled", NSColor.systemIndigo, "Appearance", "Follow the Mac, or lock light or dark", AppAppearance.allCases.map(\.title), AppAppearance.allCases.firstIndex(of: draft.appearance) ?? 0, #selector(changeAppearance(_:)))
         addMicRow()
         addActionRow("viewfinder", NSColor.systemPink, "Permissions", "Manage microphone and Accessibility", "Configure", #selector(openPermissions))
-        addInfoRow("info.circle.fill", NSColor.systemBlue, "Version", "Whisperly 1.0.0  ·  local Whisper")
-        addToggle("power", NSColor.systemMint, "Start at Login", "Open Whisperly when you log in", draft.startAtLogin, #selector(toggleLogin))
+        addInfoRow("info.circle.fill", NSColor.systemBlue, "Version", "Lowkey 1.0.0  ·  local Whisper")
+        addToggle("power", NSColor.systemMint, "Start at Login", "Open Lowkey when you log in", draft.startAtLogin, #selector(toggleLogin))
         addStatus()
     }
 
@@ -159,7 +159,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         addMenuRow("globe", NSColor.systemBlue, "Dictation language", "Language used for transcription", Config.languages.map(\.1), selectedLanguageIndex(), #selector(changeLanguage(_:)))
         addActionRow("character.book.closed.fill", NSColor.systemPurple, "Custom Vocabulary", "Names and terms to keep, plus spelling fixes", "Configure", #selector(openVocabulary))
         addActionRow("textformat", NSColor.systemGreen, "Dictation Snippets", "Spoken shortcuts that expand into saved phrases", "Configure", #selector(openSnippets))
-        addMenuRow("text.quote", NSColor.systemOrange, "Punctuation behaviour", "Let Whisperly keep punctuation in the transcript", PunctuationMode.allCases.map(\.title), PunctuationMode.allCases.firstIndex(of: draft.punctuationMode) ?? 0, #selector(changePunctuation(_:)))
+        addMenuRow("text.quote", NSColor.systemOrange, "Punctuation behaviour", "Let Lowkey keep punctuation in the transcript", PunctuationMode.allCases.map(\.title), PunctuationMode.allCases.firstIndex(of: draft.punctuationMode) ?? 0, #selector(changePunctuation(_:)))
         addMenuRow("doc.on.clipboard", NSColor.systemPink, "Clipboard behavior", "When to leave the transcript on the clipboard", ClipboardBehavior.allCases.map(\.title), ClipboardBehavior.allCases.firstIndex(of: draft.clipboardBehavior) ?? 1, #selector(changeClipboard(_:)))
         addSection("SOUND")
         addToggle("speaker.slash.fill", NSColor.systemBlue, "Auto-Pause Audio", "Pause Music or Spotify while you dictate", draft.autoPauseAudio, #selector(togglePause))
@@ -255,7 +255,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         pop.action = #selector(changeMic(_:))
         pop.identifier = NSUserInterfaceItemIdentifier(devices.map(\.uniqueID).joined(separator: "\u{1e}"))
         pop.setAccessibilityLabel("Microphone")
-        let row = SettingsRow(symbol: "mic.fill", color: .systemOrange, title: "Microphone", caption: "Choose the microphone Whisperly should use", accessory: pop)
+        let row = SettingsRow(symbol: "mic.fill", color: .systemOrange, title: "Microphone", caption: "Choose the microphone Lowkey should use", accessory: pop)
         row.isInteractive = true
         row.onActivate = { [weak pop] in
             pop?.performClick(nil)

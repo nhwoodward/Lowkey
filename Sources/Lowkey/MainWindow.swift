@@ -25,7 +25,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSTableV
             backing: .buffered,
             defer: false
         )
-        window.title = "Whisperly"
+        window.title = "Lowkey"
         window.titleVisibility = .hidden
         window.minSize = NSSize(width: 820, height: 560)
         window.titlebarAppearsTransparent = true
@@ -81,7 +81,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSTableV
         let mark = BrandMark()
         mark.translatesAutoresizingMaskIntoConstraints = false
 
-        let brand = NSTextField(labelWithString: "Whisperly")
+        let brand = NSTextField(labelWithString: "Lowkey")
         brand.font = Theme.display(16, weight: .bold)
         brand.textColor = Theme.ink
         brand.translatesAutoresizingMaskIntoConstraints = false
@@ -656,8 +656,8 @@ enum VocabularySheet {
         let alert = NSAlert()
         alert.messageText = seed == nil ? "Add custom vocabulary" : "Fix a spelling"
         alert.informativeText = seed == nil
-            ? "Add a name or term Whisperly should keep."
-            : "If Whisperly misspelled something, type the wrong form and the correct one. It will start preferring the correct spelling."
+            ? "Add a name or term Lowkey should keep."
+            : "If Lowkey misspelled something, type the wrong form and the correct one. It will start preferring the correct spelling."
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
         let stack = NSStackView()

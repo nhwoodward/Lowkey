@@ -6,43 +6,44 @@ cd "$ROOT"
 
 "$ROOT/Scripts/ensure-identity.sh"
 
-swift build -c release --product Whisperly
+swift build -c release --product Lowkey
 
-BIN="$ROOT/.build/release/Whisperly"
-APP="$ROOT/dist/Whisperly.app"
+BIN="$ROOT/.build/release/Lowkey"
+APP="$ROOT/dist/Lowkey.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BIN" "$APP/Contents/MacOS/Whisperly"
+cp "$BIN" "$APP/Contents/MacOS/Lowkey"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 if [ -f "$ROOT/Resources/AppIcon.icns" ]; then
     cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 fi
-chmod +x "$APP/Contents/MacOS/Whisperly"
+chmod +x "$APP/Contents/MacOS/Lowkey"
 
 # Prefer a paid Developer ID if one exists. Otherwise keep the stable
-# "Whisperly Local" identity so TCC (mic / Accessibility) does not reset.
+# "Lowkey Local" identity so TCC (mic / Accessibility) does not reset.
 IDENT=""
 TIMESTAMP=()
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
     IDENT="$(security find-identity -v -p codesigning | awk -F'"' '/Developer ID Application/{print $2; exit}')"
     TIMESTAMP=(--timestamp)
-elif security find-identity -p codesigning 2>/dev/null | grep -q "Whisperly Local"; then
-    IDENT="Whisperly Local"
+elif security find-identity -p codesigning 2>/dev/null | grep -q "Lowkey Local"; then
+    IDENT="Lowkey Local"
 fi
 
 if [ -n "${IDENT}" ]; then
     codesign --force --deep --options runtime \
         --sign "${IDENT}" \
-        --identifier app.whisperly.local \
-        --entitlements "$ROOT/Whisperly.entitlements" \
+        --identifier app.lowkey.local \
+        --entitlements "$ROOT/Lowkey.entitlements" \
         "${TIMESTAMP[@]}" \
         "$APP" >/dev/null
 else
     codesign --force --deep --options runtime --sign - "$APP" >/dev/null
 fi
 
-INSTALL="$HOME/Applications/Whisperly.app"
+INSTALL="$HOME/Applications/Lowkey.app"
 rm -rf "$INSTALL"
+rm -rf "$HOME/Applications/Whisperly.app"
 cp -R "$APP" "$INSTALL"
 
 echo "Built $APP"

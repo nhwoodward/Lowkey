@@ -1,4 +1,4 @@
-<h1 align="center">Whisperly</h1>
+<h1 align="center">Lowkey</h1>
 
 <p align="center">
   <a href="#quick-start"><img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-111111?style=flat-square" /></a>
@@ -15,21 +15,21 @@
 </p>
 
 <p align="center">
-  <img alt="Whisperly: hold a key, speak, stay on this Mac" src="docs/images/banner.png" width="100%" />
+  <img alt="Lowkey: hold a key, speak, stay on this Mac" src="docs/images/banner.png" width="100%" />
 </p>
 
 ## What it is
 
 Cloud dictation wants an account, a subscription, and a machine that can host a large model. On a 4 GB Mac that is the whole computer.
 
-Whisperly flips that.
+Lowkey flips that.
 
 Hold **Right Command**, talk, let go. Whisper **small** runs on the same Mac through `whisper-server` bound to `127.0.0.1`. The words land wherever the cursor is. There is no account, no analytics, and no network call except that local server.
 
 It is built for **low-memory Macs** on purpose: a ~466 MB model, four decode threads, and no leftover decoder context from the last utterance. That is why it stays quick on 4 GB machines instead of asking you to buy more RAM.
 
 <p align="center">
-  <img alt="Whisperly dictation window" src="docs/images/window.png" width="86%" />
+  <img alt="Lowkey dictation window" src="docs/images/window.png" width="86%" />
 </p>
 
 ## Features
@@ -41,7 +41,7 @@ It is built for **low-memory Macs** on purpose: a ~466 MB model, four decode thr
 - **Your names, your phrases** - custom vocabulary for names and spelling, plus spoken snippets that expand into saved text.
 - **History stays here** - replay, recopy, or delete. Audio and transcripts live under Application Support, not this repository.
 - **Menu bar, not a dock hog** - hide from the Dock, start at login, optionally pause Music or Spotify while you talk.
-- **Hardened Runtime** - local builds are signed with a self-signed `Whisperly Local` identity so Microphone and Accessibility survive rebuilds.
+- **Hardened Runtime** - local builds are signed with a self-signed `Lowkey Local` identity so Microphone and Accessibility survive rebuilds.
 
 <p align="center">
   <img alt="General settings" src="docs/images/settings.png" width="48%" />
@@ -59,7 +59,7 @@ It is built for **low-memory Macs** on purpose: a ~466 MB model, four decode thr
 The first run downloads `ggml-small.bin` (~466 MB) and builds the app.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nhwoodward/Whisperly/main/Scripts/install.sh | zsh
+curl -fsSL https://raw.githubusercontent.com/nhwoodward/Lowkey/main/Scripts/install.sh | zsh
 ```
 
 Or from a clone:
@@ -89,39 +89,39 @@ Then grant **Microphone** and **Accessibility** when macOS asks. Hold **Right Co
         clipboard is the failsafe
 ```
 
-You talk to one shortcut. Whisperly records 16 kHz PCM on this Mac, posts it to the local engine, then pastes the transcript into the app that had focus. If that app will not take a paste, Cmd+V still has the same text.
+You talk to one shortcut. Lowkey records 16 kHz PCM on this Mac, posts it to the local engine, then pastes the transcript into the app that had focus. If that app will not take a paste, Cmd+V still has the same text.
 
 ## Privacy
 
 Audio and transcripts stay on the Mac.
 
 - The engine listens only on `127.0.0.1`. There is no account, no analytics, and no outbound call for transcription.
-- `~/Library/Application Support/Whisperly/` is created mode `700`. History, the model, config, and logs live there. They are not part of this repository.
+- `~/Library/Application Support/Lowkey/` is created mode `700`. History, the model, config, and logs live there. They are not part of this repository.
 - Signing keys stay in Application Support. They are gitignored.
 - Hardened Runtime is on. The entitlements are microphone input and Apple Events for paste, nothing else.
 
 ## Files
 
-- App: `~/Applications/Whisperly.app`
-- Model: `~/Library/Application Support/Whisperly/models/ggml-small.bin`
-- Config: `~/Library/Application Support/Whisperly/config.json`
-- Logs: `~/Library/Application Support/Whisperly/logs/`
+- App: `~/Applications/Lowkey.app`
+- Model: `~/Library/Application Support/Lowkey/models/ggml-small.bin`
+- Config: `~/Library/Application Support/Lowkey/config.json`
+- Logs: `~/Library/Application Support/Lowkey/logs/`
 
 ## Rebuild
 
 ```bash
 ./Scripts/bundle.sh
-open ~/Applications/Whisperly.app
+open ~/Applications/Lowkey.app
 ```
 
 ## Signing
 
-Local builds use **Hardened Runtime** and a self-signed `Whisperly Local` certificate so Microphone and Accessibility stay granted across rebuilds. Signing keys stay in Application Support and are not in this repo.
+Local builds use **Hardened Runtime** and a self-signed `Lowkey Local` certificate so Microphone and Accessibility stay granted across rebuilds. Signing keys stay in Application Support and are not in this repo.
 
 **Notarization** is a separate Apple scan for giving the app to other Macs. It needs a paid Apple Developer Program membership and a Developer ID certificate:
 
 ```bash
-xcrun notarytool store-credentials whisperly-notary \
+xcrun notarytool store-credentials lowkey-notary \
   --apple-id YOUR_APPLE_ID --team-id YOUR_TEAM_ID --password APP_SPECIFIC_PASSWORD
 ./Scripts/bundle.sh
 ./Scripts/notarize.sh
@@ -131,7 +131,7 @@ xcrun notarytool store-credentials whisperly-notary \
 
 Speech recognition is [OpenAI Whisper](https://github.com/openai/whisper) (MIT), run on this Mac through [whisper.cpp](https://github.com/ggml-org/whisper.cpp) `whisper-server`. The model is `ggml-small.bin` from that distribution.
 
-Whisperly is an independent Mac app. It is not affiliated with OpenAI, whisper.cpp, or any other product named Whisperly.
+Lowkey is an independent Mac app. It is not affiliated with OpenAI or whisper.cpp.
 
 ## License
 

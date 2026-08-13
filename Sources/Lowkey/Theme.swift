@@ -189,7 +189,7 @@ enum Theme {
     }
 
     private static func dynamic(_ name: String, _ pick: @escaping (Bool) -> NSColor) -> NSColor {
-        NSColor(name: "whisperly.\(name)") { appearance in
+        NSColor(name: "lowkey.\(name)") { appearance in
             appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
                 ? pick(true)
                 : pick(false)

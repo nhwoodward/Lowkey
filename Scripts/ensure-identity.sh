@@ -1,8 +1,8 @@
 #!/bin/zsh
 set -euo pipefail
 
-IDENT_NAME="Whisperly Local"
-SUPPORT="${HOME}/Library/Application Support/Whisperly/signing"
+IDENT_NAME="Lowkey Local"
+SUPPORT="${HOME}/Library/Application Support/Lowkey/signing"
 KEYCHAIN="${HOME}/Library/Keychains/login.keychain-db"
 
 # Do not use find-identity -v. That hides this self-signed cert as
@@ -12,26 +12,26 @@ if security find-identity -p codesigning 2>/dev/null | grep -q "${IDENT_NAME}"; 
 fi
 
 mkdir -p "${SUPPORT}"
-if [ ! -f "${SUPPORT}/whisperly.key" ]; then
+if [ ! -f "${SUPPORT}/lowkey.key" ]; then
     openssl req -new -x509 -days 3650 -nodes \
         -newkey rsa:2048 \
-        -subj "/CN=Whisperly Local/O=Whisperly/C=US" \
+        -subj "/CN=Lowkey Local/O=Lowkey/C=US" \
         -addext "extendedKeyUsage=codeSigning" \
         -addext "keyUsage=digitalSignature" \
-        -keyout "${SUPPORT}/whisperly.key" \
-        -out "${SUPPORT}/whisperly.crt" >/dev/null 2>&1
+        -keyout "${SUPPORT}/lowkey.key" \
+        -out "${SUPPORT}/lowkey.crt" >/dev/null 2>&1
 fi
 
 openssl pkcs12 -export \
-    -inkey "${SUPPORT}/whisperly.key" \
-    -in "${SUPPORT}/whisperly.crt" \
-    -out "${SUPPORT}/whisperly.p12" \
-    -passout pass:whisperly \
+    -inkey "${SUPPORT}/lowkey.key" \
+    -in "${SUPPORT}/lowkey.crt" \
+    -out "${SUPPORT}/lowkey.p12" \
+    -passout pass:lowkey \
     -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1 >/dev/null 2>&1
 
-security import "${SUPPORT}/whisperly.p12" \
+security import "${SUPPORT}/lowkey.p12" \
     -k "${KEYCHAIN}" \
-    -P whisperly \
+    -P lowkey \
     -T /usr/bin/codesign \
     -T /usr/bin/security \
     >/dev/null 2>&1 || true

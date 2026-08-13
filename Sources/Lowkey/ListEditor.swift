@@ -87,8 +87,8 @@ final class ListEditorController: NSWindowController, NSTextFieldDelegate {
         let root = NSView()
 
         let hint = NSTextField(wrappingLabelWithString: mode == .vocabulary
-            ? "Add names Whisperly should keep. To fix a misspelling, type what it wrote and the correct spelling."
-            : "Say the trigger and Whisperly expands it into the saved phrase.")
+            ? "Add names Lowkey should keep. To fix a misspelling, type what it wrote and the correct spelling."
+            : "Say the trigger and Lowkey expands it into the saved phrase.")
         hint.font = NSFont.systemFont(ofSize: 12)
         hint.textColor = Theme.inkMuted
         hint.translatesAutoresizingMaskIntoConstraints = false

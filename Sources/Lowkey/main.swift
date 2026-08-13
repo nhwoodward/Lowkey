@@ -1,6 +1,6 @@
 import AppKit
 
-enum WhisperlyMain {
+enum LowkeyMain {
     static func main() {
         let app = NSApplication.shared
         let delegate = AppDelegate()
@@ -10,4 +10,4 @@ enum WhisperlyMain {
     }
 }
 
-WhisperlyMain.main()
+LowkeyMain.main()
