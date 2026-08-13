@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="#quick-start"><img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-111111?style=flat-square" /></a>
-  <a href="#what-it-is"><img alt="8 GB of RAM and up" src="https://img.shields.io/badge/RAM-4%20GB%2B-111111?style=flat-square" /></a>
+  <a href="#what-it-is"><img alt="8 GB of RAM and up" src="https://img.shields.io/badge/RAM-8%20GB%2B-111111?style=flat-square" /></a>
   <a href="#privacy"><img alt="Engine is local Whisper" src="https://img.shields.io/badge/engine-Whisper-111111?style=flat-square" /></a>
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" /></a>
 </p>
@@ -20,7 +20,7 @@
 
 ## What it is
 
-Cloud dictation wants an account, a subscription, and a machine that can host a large model. On a 8 GB Mac that is the whole computer.
+Cloud dictation wants an account, a subscription, and a machine that can host a large model. On an 8 GB Mac that is the whole computer.
 
 Lowkey flips that.
 
@@ -35,7 +35,7 @@ It is built for **low-memory Macs** on purpose: a ~466 MB model, four decode thr
 ## Features
 
 - **Hold to talk** - Right Command by default. Switch to Left Command, Right Option, or Fn. Press **Esc** while holding to discard the take.
-- **Small on purpose** - `ggml-small.bin`, four threads, max-context 0. Light enough for a 8 GB Mac. Fast enough that short clips do not pile up.
+- **Small on purpose** - `ggml-small.bin`, four threads, max-context 0. Light enough for an 8 GB Mac. Fast enough that short clips do not pile up.
 - **Loopback only** - the engine is forced onto `127.0.0.1`. Editing `config.json` cannot point it at the network.
 - **Paste, then keep the words** - a keystroke paste into the focused app. If paste cannot land, the transcript is still on the clipboard.
 - **Your names, your phrases** - custom vocabulary for names and spelling, plus spoken snippets that expand into saved text.
