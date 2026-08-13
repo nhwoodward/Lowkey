@@ -2,7 +2,7 @@ import AppKit
 import AVFoundation
 import ServiceManagement
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var config = Config.load()
     private let engine = Engine()
     private let recorder = Recorder()
@@ -12,14 +12,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mainWindow: MainWindowController?
     private var statusItem: NSStatusItem?
     private var recordStartedAt: Date?
+    private var recordLimitWork: DispatchWorkItem?
     private var busy = false
     private var recording = false
     private var lastTranscript = ""
     private var escapeMonitor: Any?
     private var localEscapeMonitor: Any?
     private var pasteTarget: PasteTarget?
-    private var accessTimer: Timer?
     private var demoTimer: Timer?
+
+    private static let maxRecordSeconds: TimeInterval = 120
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         applyAppearance()
@@ -28,9 +30,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         requestMicrophone()
         applyHotkey()
         restBar()
-        accessTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.refreshMenu()
-        }
         flowBar.onIdleTap = { [weak self] in self?.beginHold() }
         recorder.onWave = { [weak self] samples in
             self?.flowBar.pushWave(samples)
@@ -50,7 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        accessTimer?.invalidate()
+        recordLimitWork?.cancel()
         hotkey.stop()
         recorder.stop()
         engine.stop()
@@ -86,6 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             recording = true
             flowBar.setMode(.listening)
             listenForEscape(true)
+            scheduleRecordLimit()
             playCue(.start)
             pasteTarget = PasteTarget.capture()
             resolveWeztermPane()
@@ -112,6 +112,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recording = false
         busy = true
         listenForEscape(false)
+        recordLimitWork?.cancel()
+        recordLimitWork = nil
         playCue(.stop)
         recorder.releaseMic()
         MediaPause.resumeIfNeeded()
@@ -226,6 +228,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         busy = false
         pasteTarget = nil
         listenForEscape(false)
+        recordLimitWork?.cancel()
+        recordLimitWork = nil
         MediaPause.resumeIfNeeded()
         if let url = recorder.stop() {
             try? FileManager.default.removeItem(at: url)
@@ -247,9 +251,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if event.keyCode == 53 { self?.cancelHold() }
         }
         localEscapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 { self?.cancelHold() }
+            if event.keyCode == 53 {
+                self?.cancelHold()
+                return nil
+            }
             return event
         }
+    }
+
+    private func scheduleRecordLimit() {
+        recordLimitWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.endHold()
+        }
+        recordLimitWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.maxRecordSeconds, execute: work)
     }
 
     private func reportPaste(_ outcome: PasteService.PasteOutcome) {
@@ -280,13 +296,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Whisperly")
             button.image?.isTemplate = true
         }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.delegate = self
+        item.menu = menu
         statusItem = item
         refreshMenu()
     }
 
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        refreshMenu()
+    }
+
     private func refreshMenu() {
-        let menu = NSMenu()
-        menu.autoenablesItems = false
+        guard let menu = statusItem?.menu else { return }
+        menu.removeAllItems()
         let status = engine.isReady ? "Engine ready" : "Engine starting"
         let header = NSMenuItem(title: "Whisperly", action: nil, keyEquivalent: "")
         header.isEnabled = false
@@ -303,13 +327,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Open Whisperly", action: #selector(openMain), keyEquivalent: "o"))
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
-        let paste = NSMenuItem(title: "Paste last transcript", action: #selector(pasteLast), keyEquivalent: "v")
+        let paste = NSMenuItem(title: "Paste last transcript", action: #selector(pasteLast), keyEquivalent: "")
         paste.isEnabled = !lastTranscript.isEmpty
         menu.addItem(paste)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Whisperly", action: #selector(quit), keyEquivalent: "q"))
         menu.items.forEach { $0.target = self }
-        statusItem?.menu = menu
     }
 
     @objc private func openSettings() {
@@ -409,26 +432,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyLoginItem() {
+        let service = SMAppService.mainApp
         do {
             if config.startAtLogin {
-                try SMAppService.mainApp.register()
-            } else {
-                try SMAppService.mainApp.unregister()
+                if service.status != .enabled {
+                    try service.register()
+                }
+            } else if service.status == .enabled {
+                try service.unregister()
             }
-        } catch {}
+        } catch {
+            AppLog.line("login item error=\(error.localizedDescription)")
+        }
     }
 
     @objc private func pasteLast() {
         guard !lastTranscript.isEmpty else { return }
         PasteService.insert(lastTranscript, clipboard: config.clipboardBehavior) { [weak self] outcome in
-            self?.reportPaste(outcome)
-        }
-    }
-
-    @objc private func testPaste() {
-        let target = PasteTarget.capture()
-        PasteService.insert("whisperly-test", into: target, clipboard: .always) { [weak self] outcome in
-            self?.refreshMenu()
             self?.reportPaste(outcome)
         }
     }
@@ -453,7 +473,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let path = Bundle.main.bundlePath
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        task.arguments = ["-c", "sleep 0.4; open \"\(path)\""]
+        task.arguments = ["-c", "sleep 0.4; /usr/bin/open \"$1\"", "relaunch", path]
         try? task.run()
         NSApp.terminate(nil)
     }

@@ -21,7 +21,7 @@ final class Engine {
             // keeps previous transcripts as decoder context and gets slower
             // with every dictation. Kill it and own the next process.
             self.teardownLocked()
-            Self.terminatePortOccupant(port: config.port)
+            Self.terminatePortOccupant(port: config.bindPort)
             do {
                 try self.spawn(config: config)
             } catch {
@@ -55,7 +55,7 @@ final class Engine {
                 return true
             }
             self.teardownLocked()
-            Self.terminatePortOccupant(port: config.port)
+            Self.terminatePortOccupant(port: config.bindPort)
             if self.stopRequested { return false }
             do {
                 try self.spawn(config: config)
@@ -95,7 +95,7 @@ final class Engine {
         }
 
         let logURL = Config.logsDirectory.appendingPathComponent("engine.log")
-        Self.rotateLogIfNeeded(logURL)
+        AppLog.rotateIfNeeded(logURL)
         if !FileManager.default.fileExists(atPath: logURL.path) {
             FileManager.default.createFile(atPath: logURL.path, contents: nil)
         }
@@ -106,8 +106,8 @@ final class Engine {
         process.executableURL = URL(fileURLWithPath: config.whisperServerPath)
         process.arguments = [
             "-m", config.modelPath,
-            "--host", config.host,
-            "--port", String(config.port),
+            "--host", config.bindHost,
+            "--port", String(config.bindPort),
             "-l", config.language,
             "-t", String(config.effectiveThreads),
             // Do not carry previous transcripts into the next decode.
@@ -124,6 +124,7 @@ final class Engine {
             }
         }
         try process.run()
+        try? log.close()
         self.process = process
         AppLog.line("engine spawned pid=\(process.processIdentifier) threads=\(config.effectiveThreads) max_context=0")
     }
@@ -178,16 +179,27 @@ final class Engine {
             .split(whereSeparator: \.isNewline)
             .compactMap { Int32($0) } ?? []
         let selfPID = getpid()
-        for pid in pids where pid != selfPID {
+        let victims = pids.filter { pid in
+            pid != selfPID && Self.isWhisperServer(pid)
+        }
+        for pid in victims {
             AppLog.line("engine replacing occupant pid=\(pid) port=\(port)")
             kill(pid, SIGTERM)
         }
-        if !pids.isEmpty {
+        if !victims.isEmpty {
             Thread.sleep(forTimeInterval: 0.15)
-            for pid in pids where pid != selfPID {
+            for pid in victims {
                 kill(pid, SIGKILL)
             }
         }
+    }
+
+    private static func isWhisperServer(_ pid: Int32) -> Bool {
+        var buffer = [CChar](repeating: 0, count: 4096)
+        let written = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard written > 0 else { return false }
+        let path = String(cString: buffer)
+        return path.contains("whisper-server")
     }
 
     private static func waitForExit(_ process: Process, timeout: TimeInterval) {
@@ -197,15 +209,6 @@ final class Engine {
         }
     }
 
-    private static func rotateLogIfNeeded(_ url: URL) {
-        let maxBytes: UInt64 = 2 * 1024 * 1024
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let size = attrs[.size] as? UInt64,
-              size > maxBytes else { return }
-        let backup = url.deletingPathExtension().appendingPathExtension("log.old")
-        try? FileManager.default.removeItem(at: backup)
-        try? FileManager.default.moveItem(at: url, to: backup)
-    }
 }
 
 enum EngineError: LocalizedError {
@@ -225,20 +228,36 @@ enum EngineError: LocalizedError {
 enum AppLog {
     private static let url = Config.logsDirectory.appendingPathComponent("app.log")
     private static let lock = NSLock()
+    private static let stamp: ISO8601DateFormatter = {
+        ISO8601DateFormatter()
+    }()
 
     static func line(_ message: String) {
-        let stamp = ISO8601DateFormatter().string(from: Date())
-        let text = "\(stamp) \(message)\n"
+        write(to: url, message)
+    }
+
+    static func write(to file: URL, _ message: String) {
+        let text = "\(stamp.string(from: Date())) \(message)\n"
         guard let data = text.data(using: .utf8) else { return }
         lock.lock()
         defer { lock.unlock() }
-        if FileManager.default.fileExists(atPath: url.path),
-           let handle = try? FileHandle(forWritingTo: url) {
+        rotateIfNeeded(file)
+        if FileManager.default.fileExists(atPath: file.path),
+           let handle = try? FileHandle(forWritingTo: file) {
             defer { try? handle.close() }
             _ = try? handle.seekToEnd()
             try? handle.write(contentsOf: data)
         } else {
-            try? data.write(to: url)
+            try? data.write(to: file)
         }
+    }
+
+    static func rotateIfNeeded(_ file: URL, maxBytes: UInt64 = 2 * 1024 * 1024) {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: file.path),
+              let size = attrs[.size] as? UInt64,
+              size > maxBytes else { return }
+        let backup = file.deletingLastPathComponent().appendingPathComponent(file.lastPathComponent + ".old")
+        try? FileManager.default.removeItem(at: backup)
+        try? FileManager.default.moveItem(at: file, to: backup)
     }
 }

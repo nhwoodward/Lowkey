@@ -1,5 +1,4 @@
 import AppKit
-import Carbon.HIToolbox
 
 final class HotkeyMonitor {
     var onHoldStart: (() -> Void)?

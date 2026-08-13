@@ -1,6 +1,5 @@
 import AppKit
 import ApplicationServices
-import Carbon
 import Darwin
 
 struct PasteTarget {
@@ -320,17 +319,7 @@ enum PasteService {
     }
 
     static func log(_ line: String) {
-        let stamp = ISO8601DateFormatter().string(from: Date())
-        let text = "\(stamp) \(line)\n"
-        guard let data = text.data(using: .utf8) else { return }
-        if FileManager.default.fileExists(atPath: logURL.path),
-           let handle = try? FileHandle(forWritingTo: logURL) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: data)
-        } else {
-            try? data.write(to: logURL)
-        }
+        AppLog.write(to: logURL, line)
     }
 }
 

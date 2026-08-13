@@ -268,7 +268,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             content.setCustomSpacing(16, after: last)
         }
         let text = engineReady
-            ? "Engine ready on \(draft.host):\(draft.port)"
+            ? "Engine ready on \(draft.bindHost):\(draft.bindPort)"
             : (engineError ?? "Engine is not running")
         let access = PasteService.isTrusted() ? "Accessibility is active." : "Accessibility still needs a grant."
         let field = NSTextField(wrappingLabelWithString: "\(text)  \(access)")

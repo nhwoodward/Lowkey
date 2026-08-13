@@ -32,7 +32,7 @@ security import "${SUPPORT}/whisperly.p12" \
     -P whisperly \
     -T /usr/bin/codesign \
     -T /usr/bin/security \
-    -A >/dev/null 2>&1 || true
+    >/dev/null 2>&1 || true
 
 security set-key-partition-list \
     -S apple-tool:,apple:,codesign: \

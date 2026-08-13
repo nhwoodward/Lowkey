@@ -11,6 +11,11 @@ enum Transcriber {
         let started = Date()
         let audio = try Data(contentsOf: fileURL)
         guard audio.count > 800 else { return .silence }
+        // ~3 minutes of 16 kHz mono PCM plus a WAV header.
+        guard audio.count < 6_000_000 else {
+            AppLog.line("transcribe rejected oversized wav bytes=\(audio.count)")
+            throw TranscriberError.tooLarge
+        }
 
         let boundary = "Boundary-\(UUID().uuidString)"
         var body = Data()
@@ -146,11 +151,13 @@ enum Transcriber {
 
 enum TranscriberError: LocalizedError {
     case emptyResponse
+    case tooLarge
     case server(String)
 
     var errorDescription: String? {
         switch self {
         case .emptyResponse: return "Whisper returned no text."
+        case .tooLarge: return "Recording is too long."
         case .server(let message): return message
         }
     }

@@ -97,10 +97,13 @@ struct Config: Codable {
         return url
     }
 
+    static let loopbackHost = "127.0.0.1"
+
     static var supportDirectory: URL {
         let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Whisperly", isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
         return url
     }
 
@@ -231,7 +234,15 @@ struct Config: Codable {
     }
 
     var engineIdentity: String {
-        "\(whisperServerPath)|\(modelPath)|\(host)|\(port)|\(language)|\(effectiveThreads)"
+        "\(whisperServerPath)|\(modelPath)|\(bindHost)|\(bindPort)|\(language)|\(effectiveThreads)"
+    }
+
+    // Never bind or POST off-box, even if config.json was edited by hand.
+    var bindHost: String { Self.loopbackHost }
+
+    var bindPort: Int {
+        let raw = port == 0 ? 18789 : port
+        return min(65_535, max(raw, 1_024))
     }
 
     // Old builds stored threads=2. The server default is 4, and this
@@ -249,7 +260,7 @@ struct Config: Codable {
     }
 
     var baseURL: URL {
-        URL(string: "http://\(host):\(port)")!
+        URL(string: "http://\(bindHost):\(bindPort)")!
     }
 
     var inferenceURL: URL {

@@ -30,9 +30,13 @@ final class VocabularyStore {
     private init() { load() }
 
     var promptHint: String {
-        let names = terms.map(\.phrase).filter { !$0.isEmpty }
+        let names = terms.map(\.phrase).filter { !$0.isEmpty }.prefix(24)
         guard !names.isEmpty else { return "" }
-        return "Preferred spellings: " + names.joined(separator: ", ") + "."
+        var hint = "Preferred spellings: " + names.joined(separator: ", ") + "."
+        if hint.count > 400 {
+            hint = String(hint.prefix(400))
+        }
+        return hint
     }
 
     func addTerm(_ phrase: String) {
