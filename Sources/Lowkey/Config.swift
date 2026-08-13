@@ -149,6 +149,11 @@ struct Config: Codable {
                 next.whisperServerPath = server
                 changed = true
             }
+            let model = resolvedModelPath(preferred: next.modelPath)
+            if model != next.modelPath {
+                next.modelPath = model
+                changed = true
+            }
             if changed { next.save() }
             return next
         }
@@ -171,6 +176,22 @@ struct Config: Codable {
             }
         }
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) } ?? preferred
+    }
+
+    // After the Whisperly -> Lowkey rename, saved configs still pointed at
+    // Application Support/Whisperly. Follow the file, then the default model.
+    static func resolvedModelPath(preferred: String) -> String {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: preferred) { return preferred }
+        if preferred.contains("/Whisperly/") {
+            let rewritten = preferred.replacingOccurrences(of: "/Whisperly/", with: "/Lowkey/")
+            if fm.fileExists(atPath: rewritten) { return rewritten }
+        }
+        let named = modelsDirectory.appendingPathComponent((preferred as NSString).lastPathComponent).path
+        if fm.fileExists(atPath: named) { return named }
+        let fallback = modelsDirectory.appendingPathComponent("ggml-small.bin").path
+        if fm.fileExists(atPath: fallback) { return fallback }
+        return preferred
     }
 
     init(
