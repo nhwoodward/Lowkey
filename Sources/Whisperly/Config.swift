@@ -132,17 +132,39 @@ struct Config: Codable {
     static func load() -> Config {
         if let data = try? Data(contentsOf: fileURL),
            let decoded = try? JSONDecoder().decode(Config.self, from: data) {
-            if decoded.threads < 4 {
-                var upgraded = decoded
-                upgraded.threads = 4
-                upgraded.save()
-                return upgraded
+            var next = decoded
+            var changed = false
+            if next.threads < 4 {
+                next.threads = 4
+                changed = true
             }
-            return decoded
+            let server = resolvedWhisperServerPath(preferred: next.whisperServerPath)
+            if server != next.whisperServerPath {
+                next.whisperServerPath = server
+                changed = true
+            }
+            if changed { next.save() }
+            return next
         }
         let defaults = Config.makeDefault()
         defaults.save()
         return defaults
+    }
+
+    static func resolvedWhisperServerPath(preferred: String) -> String {
+        if FileManager.default.isExecutableFile(atPath: preferred) {
+            return preferred
+        }
+        var candidates = [
+            "/opt/homebrew/bin/whisper-server",
+            "/usr/local/bin/whisper-server",
+        ]
+        if let path = ProcessInfo.processInfo.environment["PATH"] {
+            for dir in path.split(separator: ":") {
+                candidates.append(URL(fileURLWithPath: String(dir)).appendingPathComponent("whisper-server").path)
+            }
+        }
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) } ?? preferred
     }
 
     init(
@@ -186,7 +208,7 @@ struct Config: Codable {
     static func makeDefault() -> Config {
         Config(
             modelPath: modelsDirectory.appendingPathComponent("ggml-small.bin").path,
-            whisperServerPath: "/opt/homebrew/bin/whisper-server",
+            whisperServerPath: resolvedWhisperServerPath(preferred: "/opt/homebrew/bin/whisper-server"),
             host: "127.0.0.1",
             port: 18789,
             language: "en",

@@ -6,21 +6,30 @@ No account. No analytics. No cloud.
 
 Licensed under the [MIT License](LICENSE).
 
-## Requirements
+## Install
 
-- macOS 14 or later
-- [Homebrew](https://brew.sh) `whisper-cpp` (`whisper-server` on your `PATH`)
-- A local Whisper model, typically `ggml-small.bin`
+Needs [Homebrew](https://brew.sh) and the Xcode Command Line Tools. First run
+downloads the small Whisper model (~466 MB) and builds the app.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nhwoodward/Whisperly/main/Scripts/install.sh | zsh
+```
+
+Or from a clone:
+
+```bash
+./Scripts/install.sh
+```
+
+Then grant Microphone and Accessibility when macOS asks. Hold **Right Command**,
+speak, release. Press **Esc** while holding to discard.
 
 ## Use
 
-1. Build and install with `./Scripts/bundle.sh`, then open `~/Applications/Whisperly.app`.
-2. Put the model at `~/Library/Application Support/Whisperly/models/ggml-small.bin`.
-3. Grant Microphone and Accessibility when macOS asks.
-4. Hold **Right Command** (or the shortcut you set), talk, let go.
-5. The Flow Bar shows a live waveform, then a spinner, then a check when the words are ready.
-6. Press **Esc** while holding the shortcut to discard the current recording.
-7. Text is pasted into the focused app. If paste is blocked, the transcript stays on the clipboard.
+1. Hold **Right Command** (or the shortcut you set), talk, let go.
+2. The Flow Bar shows a live waveform, then a spinner, then a check when the words are ready.
+3. Press **Esc** while holding the shortcut to discard the current recording.
+4. Text is pasted into the focused app. If paste is blocked, the transcript stays on the clipboard.
 
 ## Privacy
 
