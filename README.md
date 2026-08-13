@@ -127,6 +127,12 @@ xcrun notarytool store-credentials whisperly-notary \
 ./Scripts/notarize.sh
 ```
 
+## Credits
+
+Speech recognition is [OpenAI Whisper](https://github.com/openai/whisper) (MIT), run on this Mac through [whisper.cpp](https://github.com/ggml-org/whisper.cpp) `whisper-server`. The model is `ggml-small.bin` from that distribution.
+
+Whisperly is an independent Mac app. It is not affiliated with OpenAI, whisper.cpp, or any other product named Whisperly.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
