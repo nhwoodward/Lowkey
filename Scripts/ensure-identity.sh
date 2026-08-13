@@ -5,7 +5,9 @@ IDENT_NAME="Whisperly Local"
 SUPPORT="${HOME}/Library/Application Support/Whisperly/signing"
 KEYCHAIN="${HOME}/Library/Keychains/login.keychain-db"
 
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "${IDENT_NAME}"; then
+# Do not use find-identity -v. That hides this self-signed cert as
+# untrusted and would recreate it on every build.
+if security find-identity -p codesigning 2>/dev/null | grep -q "${IDENT_NAME}"; then
     exit 0
 fi
 

@@ -78,9 +78,9 @@ enum PasteService {
             Thread.sleep(forTimeInterval: prePasteDelay)
             waitForModifiersToClear()
 
-            // Always attempt the keystroke. AX often reports WezTerm, Zen,
-            // and Notes as having no focused field even when the caret is
-            // there. Skipping Cmd+V here is what broke paste everywhere.
+            // PASTE CONTRACT: never skip the keystroke because a probe
+            // failed. AX lies for WezTerm, Zen, Notes, and Chromium.
+            // Clipboard is already filled. Worst case the user Cmd+V.
             var outcome = PasteOutcome.unknown
             if isTrusted() {
                 DispatchQueue.main.sync { pasteFromClipboardVoiceInk() }

@@ -20,6 +20,14 @@ No account. No analytics. No cloud.
 6. Press **Esc** while holding the shortcut to discard the current recording.
 7. Text is pasted into the focused app. If paste is blocked, the transcript stays on the clipboard.
 
+## Privacy
+
+Audio and transcripts stay on the Mac. The engine listens only on
+`127.0.0.1`. There is no account, no analytics, and no network call
+except that local server. History and logs live under
+`~/Library/Application Support/Whisperly/` and are not part of this
+repository.
+
 ## Files
 
 - App: `~/Applications/Whisperly.app`
