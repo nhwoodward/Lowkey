@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var recording = false
     private var lastTranscript = ""
     private var escapeMonitor: Any?
+    private var localEscapeMonitor: Any?
     private var pasteTarget: PasteTarget?
     private var accessTimer: Timer?
     private var demoTimer: Timer?
@@ -53,7 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkey.stop()
         recorder.stop()
         engine.stop()
-        if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
+        listenForEscape(false)
     }
 
     private func applyHotkey() {
@@ -66,7 +67,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func beginHold() {
-        guard !busy, !recording else { return }
+        if recording { return }
+        if busy {
+            if flowBar.mode == .working {
+                AppLog.line("hold ignored busy=working")
+            } else {
+                AppLog.line("hold ignored busy")
+                flowBar.setMode(.failed("Still working"))
+            }
+            return
+        }
         do {
             flowBar.resetLevels()
             recordStartedAt = Date()
@@ -109,7 +119,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let target = pasteTarget
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            self.recorder.finalizeOutput()
+            do {
+                try self.recorder.finalizeOutput()
+            } catch {
+                DispatchQueue.main.async {
+                    self.busy = false
+                    self.pasteTarget = nil
+                    AppLog.line("release save-failed")
+                    self.flowBar.setMode(.failed("Couldn't save the recording"))
+                }
+                return
+            }
             let url = self.recorder.fileURL
             let speech = self.recorder.containsSpeech
             let energy = self.recorder.heardEnergy
@@ -137,8 +157,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     switch outcome {
                     case .silence:
                         AppLog.line("release outcome=silence")
-                        self.restBar()
+                        self.flowBar.setMode(.failed("Nothing heard"))
                     case .discardedNoise:
+                        AppLog.line("release outcome=noise")
                         self.flowBar.setMode(.failed("Discarded as noise"))
                     case .text(let text):
                         self.lastTranscript = text
@@ -156,7 +177,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             text,
                             into: target,
                             clipboard: self.config.clipboardBehavior
-                        )
+                        ) { outcome in
+                            self.reportPaste(outcome)
+                        }
                     }
                     self.refreshMenu()
                     // Deleted here, after HistoryStore has copied or moved
@@ -215,10 +238,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSEvent.removeMonitor(escapeMonitor)
             self.escapeMonitor = nil
         }
+        if let localEscapeMonitor {
+            NSEvent.removeMonitor(localEscapeMonitor)
+            self.localEscapeMonitor = nil
+        }
         guard on else { return }
         escapeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.keyCode == 53 { self?.cancelHold() }
         }
+        localEscapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53 { self?.cancelHold() }
+            return event
+        }
+    }
+
+    private func reportPaste(_ outcome: PasteService.PasteOutcome) {
+        guard outcome == .failed else { return }
+        AppLog.line("paste failed")
+        flowBar.setMode(.failed("Paste didn't land. It's on the clipboard."))
     }
 
     private enum RecordCue {
@@ -305,7 +342,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.onUpload = { [weak self] url in self?.transcribeFile(url) }
             window.onPasteItem = { [weak self] item in
                 guard let self else { return }
-                PasteService.insert(item.text, clipboard: self.config.clipboardBehavior)
+                PasteService.insert(item.text, clipboard: self.config.clipboardBehavior) { [weak self] outcome in
+                    self?.reportPaste(outcome)
+                }
             }
             mainWindow = window
         }
@@ -321,10 +360,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 let outcome = try self.transcribeWithRecovery(fileURL: url)
                 DispatchQueue.main.async {
-                    guard case .text(let text) = outcome, !text.isEmpty else { return }
-                    self.lastTranscript = text
-                    HistoryStore.shared.add(text: text, duration: 0, language: self.config.language, audioURL: url)
-                    self.refreshMenu()
+                    switch outcome {
+                    case .text(let text) where !text.isEmpty:
+                        self.lastTranscript = text
+                        HistoryStore.shared.add(text: text, duration: 0, language: self.config.language, audioURL: url)
+                        self.refreshMenu()
+                    case .discardedNoise:
+                        self.flowBar.setMode(.failed("Discarded as noise"))
+                    default:
+                        self.flowBar.setMode(.failed("Nothing heard"))
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -375,13 +420,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func pasteLast() {
         guard !lastTranscript.isEmpty else { return }
-        PasteService.insert(lastTranscript, clipboard: config.clipboardBehavior)
+        PasteService.insert(lastTranscript, clipboard: config.clipboardBehavior) { [weak self] outcome in
+            self?.reportPaste(outcome)
+        }
     }
 
     @objc private func testPaste() {
         let target = PasteTarget.capture()
-        PasteService.insert("whisperly-test", into: target, clipboard: .always) { [weak self] in
+        PasteService.insert("whisperly-test", into: target, clipboard: .always) { [weak self] outcome in
             self?.refreshMenu()
+            self?.reportPaste(outcome)
         }
     }
 

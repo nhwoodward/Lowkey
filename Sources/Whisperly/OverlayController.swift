@@ -17,7 +17,7 @@ final class FlowBarController {
 
     private var panel: NSPanel?
     private let chrome = FlowBarChrome()
-    private var mode: FlowBarMode = .hidden
+    private(set) var mode: FlowBarMode = .hidden
     private var incoming: [CGFloat] = Array(repeating: 0, count: 18)
     private var bars: [CGFloat] = Array(repeating: 0, count: 18)
     private var timer: Timer?

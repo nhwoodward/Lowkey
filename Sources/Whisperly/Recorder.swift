@@ -36,16 +36,20 @@ final class Recorder {
     @discardableResult
     func stop() -> URL? {
         stopCapture()
-        finalizeOutput()
+        try? finalizeOutput()
         return fileURL
     }
 
-    func finalizeOutput() {
+    func finalizeOutput() throws {
         pcmLock.lock()
         let samples = pcm
         pcmLock.unlock()
         if let fileURL, !samples.isEmpty {
-            try? writeWav(samples, to: fileURL)
+            do {
+                try writeWav(samples, to: fileURL)
+            } catch {
+                throw RecorderError.saveFailed
+            }
         }
         containsSpeech = detectSpeech(in: samples)
     }
@@ -245,5 +249,11 @@ private func recorderCallback(
 
 enum RecorderError: LocalizedError {
     case failedToStart
-    var errorDescription: String? { "Could not start the microphone." }
+    case saveFailed
+    var errorDescription: String? {
+        switch self {
+        case .failedToStart: return "Could not start the microphone."
+        case .saveFailed: return "Couldn't save the recording."
+        }
+    }
 }

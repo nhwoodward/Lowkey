@@ -51,10 +51,10 @@ enum PasteService {
         _ text: String,
         into target: PasteTarget? = nil,
         clipboard: ClipboardBehavior,
-        completion: (() -> Void)? = nil
+        completion: ((PasteOutcome) -> Void)? = nil
     ) {
         guard !text.isEmpty else {
-            completion?()
+            completion?(.unknown)
             return
         }
 
@@ -67,8 +67,7 @@ enum PasteService {
                 let pane = destination.weztermPaneID ?? focusedWeztermPane()
                 if let pane, sendViaWezterm(text, pane: pane) {
                     log("wezterm send-text pane=\(pane)")
-                    outcome = .succeeded
-                    DispatchQueue.main.async { completion?() }
+                    DispatchQueue.main.async { completion?(.succeeded) }
                     return
                 }
                 log("wezterm send-text failed, falling through to keystroke")
@@ -96,12 +95,12 @@ enum PasteService {
             let restore = shouldRestore(clipboard, outcome: outcome)
             log("paste outcome=\(outcome.rawValue) restore=\(restore)")
             DispatchQueue.main.async {
-                finishRestore(previous, enabled: restore, expected: text, completion: completion)
+                finishRestore(previous, enabled: restore, expected: text, completion: completion, outcome: outcome)
             }
         }
     }
 
-    private enum PasteOutcome: String {
+    enum PasteOutcome: String {
         case succeeded
         case failed
         case unknown
@@ -185,7 +184,8 @@ enum PasteService {
         _ previous: String?,
         enabled: Bool,
         expected: String,
-        completion: (() -> Void)?
+        completion: ((PasteOutcome) -> Void)?,
+        outcome: PasteOutcome
     ) {
         if enabled, let previous {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -194,10 +194,10 @@ enum PasteService {
                     board.clearContents()
                     board.setString(previous, forType: .string)
                 }
-                completion?()
+                completion?(outcome)
             }
         } else {
-            completion?()
+            completion?(outcome)
         }
     }
 
