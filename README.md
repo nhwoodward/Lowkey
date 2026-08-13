@@ -3,7 +3,7 @@
 <p align="center">
   <a href="#quick-start"><img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-111111?style=flat-square" /></a>
   <a href="#what-it-is"><img alt="4 GB of RAM and up" src="https://img.shields.io/badge/RAM-4%20GB%2B-111111?style=flat-square" /></a>
-  <a href="#privacy"><img alt="Loopback only" src="https://img.shields.io/badge/engine-127.0.0.1-111111?style=flat-square" /></a>
+  <a href="#privacy"><img alt="Engine is local Whisper" src="https://img.shields.io/badge/engine-Whisper-111111?style=flat-square" /></a>
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" /></a>
 </p>
 
