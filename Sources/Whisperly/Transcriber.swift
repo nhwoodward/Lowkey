@@ -25,7 +25,7 @@ enum Transcriber {
         field("language", config.language)
         field("response_format", "json")
         field("temperature", "0.0")
-        field("no_speech_thold", "0.45")
+        field("no_speech_thold", "0.6")
         field("suppress_nst", "true")
         // 0 = do not keep prior transcripts as decoder prompt.
         field("max_context", "0")
@@ -66,13 +66,12 @@ enum Transcriber {
         }
 
         if let object = try? JSONSerialization.jsonObject(with: resultData) as? [String: Any] {
-            if let noSpeech = object["no_speech_prob"] as? Double, noSpeech >= 0.5 {
-                AppLog.line(String(format: "transcribe silence=%.2fs bytes=%d no_speech=%.2f", elapsed, audio.count, noSpeech))
-                return .silence
-            }
             if let text = object["text"] as? String {
                 let outcome = finish(text, config: config)
-                AppLog.line(String(format: "transcribe ok=%.2fs bytes=%d outcome=%@", elapsed, audio.count, describe(outcome)))
+                let noSpeech = object["no_speech_prob"] as? Double
+                AppLog.line(String(format: "transcribe ok=%.2fs bytes=%d outcome=%@ no_speech=%@", elapsed, audio.count, describe(outcome), noSpeech.map { String(format: "%.2f", $0) } ?? "-"))
+                // Keep real text even when Whisper also reports a high
+                // no-speech probability. Empty text is the only silence.
                 return outcome
             }
             if let error = object["error"] as? String {

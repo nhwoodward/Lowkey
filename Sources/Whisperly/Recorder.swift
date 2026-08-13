@@ -11,6 +11,7 @@ final class Recorder {
     private let pcmLock = NSLock()
     private var wave = Array(repeating: CGFloat(0), count: 18)
     private(set) var containsSpeech = false
+    private(set) var heardEnergy = false
     private(set) var fileURL: URL?
     fileprivate var running = false
 
@@ -20,6 +21,7 @@ final class Recorder {
         pcm = Data()
         pcmLock.unlock()
         containsSpeech = false
+        heardEnergy = false
         wave = Array(repeating: 0, count: 18)
         let url = Config.tmpDirectory.appendingPathComponent("clip.wav")
         try? FileManager.default.removeItem(at: url)
@@ -135,6 +137,9 @@ final class Recorder {
         wave.append(contentsOf: fresh.prefix(18))
         if wave.count > 18 { wave = Array(wave.suffix(18)) }
         while wave.count < 18 { wave.insert(0, at: 0) }
+        if fresh.contains(where: { $0 >= 0.12 }) {
+            heardEnergy = true
+        }
         let snapshot = wave
         DispatchQueue.main.async { [weak self] in
             self?.onWave?(snapshot)

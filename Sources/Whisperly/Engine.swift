@@ -114,7 +114,7 @@ final class Engine {
             "-mc", "0",
             "-sns",
             "-nt",
-            "-nth", "0.45",
+            "-nth", "0.6",
         ]
         process.standardOutput = log
         process.standardError = log

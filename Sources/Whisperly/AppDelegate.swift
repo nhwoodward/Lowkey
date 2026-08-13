@@ -103,7 +103,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         busy = true
         listenForEscape(false)
         playCue(.stop)
-        flowBar.setMode(.working)
         recorder.releaseMic()
         MediaPause.resumeIfNeeded()
         let duration = Date().timeIntervalSince(recordStartedAt ?? Date())
@@ -111,8 +110,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             self.recorder.finalizeOutput()
-            guard let url = self.recorder.fileURL, self.recorder.containsSpeech else {
-                let url = self.recorder.fileURL
+            let url = self.recorder.fileURL
+            let speech = self.recorder.containsSpeech
+            let energy = self.recorder.heardEnergy
+            AppLog.line("release speech=\(speech) energy=\(energy) url=\(url?.lastPathComponent ?? "-")")
+            // If the wave moved, send the clip. The old VAD gate dropped
+            // real speech after the bars had already reacted, then the bar
+            // vanished with no loader and no text.
+            guard let url, speech || energy else {
                 DispatchQueue.main.async {
                     self.busy = false
                     self.pasteTarget = nil
@@ -121,6 +126,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 return
             }
+            DispatchQueue.main.sync {
+                self.flowBar.setMode(.working)
+            }
             do {
                 let outcome = try self.transcribeWithRecovery(fileURL: url)
                 DispatchQueue.main.async {
@@ -128,6 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.pasteTarget = nil
                     switch outcome {
                     case .silence:
+                        AppLog.line("release outcome=silence")
                         self.restBar()
                     case .discardedNoise:
                         self.flowBar.setMode(.failed("Discarded as noise"))
