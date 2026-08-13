@@ -61,18 +61,14 @@ enum PasteService {
             let destination = target ?? DispatchQueue.main.sync { PasteTarget.capture() }
             log("insert len=\(text.count) app=\(destination.localizedName) pane=\(destination.weztermPaneID ?? "-") trusted=\(isTrusted()) clipboard=\(clipboard.rawValue)")
 
-            // Always park the transcript on the clipboard first. That is the
-            // failsafe when no field is focused or WezTerm swallows send-text.
+            // Always park the transcript on the clipboard first.
             let focus = DispatchQueue.main.sync { FocusedField.probe() }
             let previous = DispatchQueue.main.sync { writeClipboard(text) }
 
-            var outcome = PasteOutcome.unknown
             if destination.isWezTerm {
                 let pane = destination.weztermPaneID ?? focusedWeztermPane()
-                if let pane, sendViaWezterm(text, pane: pane) {
-                    log("wezterm send-text pane=\(pane)")
-                    // CLI 0 only means the pane accepted bytes, not that the
-                    // user had a field. Keep the clipboard unless they chose Never.
+                if sendViaWezterm(text, pane: pane) {
+                    log("wezterm send-text pane=\(pane ?? "active")")
                     finishOnMain(previous, clipboard: clipboard, expected: text, outcome: .unknown, completion: completion)
                     return
                 }
@@ -82,15 +78,10 @@ enum PasteService {
             Thread.sleep(forTimeInterval: prePasteDelay)
             waitForModifiersToClear()
 
-            if !focus.hasFocus {
-                log("no focused field, leaving clipboard")
-                finishOnMain(previous, clipboard: clipboard, expected: text, outcome: .failed, completion: completion)
-                return
-            }
-
-            // VoiceInk default: CGEvent Cmd+V on the hid tap, only when trusted.
-            // AppleScript reports success on macOS 27 without the keystroke landing
-            // in Notes/Zen, so it is fallback only.
+            // Always attempt the keystroke. AX often reports WezTerm, Zen,
+            // and Notes as having no focused field even when the caret is
+            // there. Skipping Cmd+V here is what broke paste everywhere.
+            var outcome = PasteOutcome.unknown
             if isTrusted() {
                 DispatchQueue.main.sync { pasteFromClipboardVoiceInk() }
                 log("voiceink hid tap posted")
@@ -98,7 +89,7 @@ enum PasteService {
             } else {
                 let scriptOK = DispatchQueue.main.sync { pasteUsingAppleScript() }
                 log("applescript=\(scriptOK) trusted=false")
-                outcome = scriptOK ? detectKeystrokeOutcome(before: focus.value, text: text) : .failed
+                outcome = scriptOK ? detectKeystrokeOutcome(before: focus.value, text: text) : .unknown
             }
 
             finishOnMain(previous, clipboard: clipboard, expected: text, outcome: outcome, completion: completion)
@@ -125,14 +116,14 @@ enum PasteService {
     private static func detectKeystrokeOutcome(before: String?, text: String) -> PasteOutcome {
         Thread.sleep(forTimeInterval: 0.08)
         let after = DispatchQueue.main.sync { FocusedField.probe() }
-        if !after.hasFocus { return .failed }
-        if let value = after.value {
-            if value.contains(text) { return .succeeded }
-            if let before, value.count > before.count { return .succeeded }
-            return .failed
+        guard after.hasFocus, let value = after.value else {
+            // No readable field. The keystroke may still have landed
+            // (terminal, Chromium). Keep the clipboard; do not alarm.
+            return .unknown
         }
-        // Focused but unreadable (typical Chromium). Do not pretend it worked.
-        return .unknown
+        if value.contains(text) { return .succeeded }
+        if let before, value.count > before.count { return .succeeded }
+        return .failed
     }
 
     private static func finishOnMain(
@@ -151,7 +142,8 @@ enum PasteService {
 
     static func focusedWeztermPane() -> String? {
         guard let binary = weztermBinary() else { return nil }
-        guard let clients = runJSON(binary, ["cli", "list-clients", "--format", "json"], timeout: 1.2) as? [[String: Any]] else {
+        guard let clients = runJSON(binary, ["cli", "list-clients", "--format", "json"], timeout: 3.0) as? [[String: Any]] else {
+            log("wezterm list-clients failed")
             return nil
         }
         let ranked = clients.compactMap { row -> (id: String, idle: Double)? in
@@ -179,8 +171,16 @@ enum PasteService {
     }
 
     private static func runJSON(_ binary: String, _ arguments: [String], timeout: TimeInterval) -> Any? {
-        let result = TimedProcess.run(executable: binary, arguments: arguments, timeout: timeout)
-        guard result.status == 0, !result.stdout.isEmpty else { return nil }
+        let result = TimedProcess.run(
+            executable: binary,
+            arguments: arguments,
+            environment: weztermEnvironment(),
+            timeout: timeout
+        )
+        guard result.status == 0, !result.stdout.isEmpty else {
+            log("wezterm cli status=\(result.status) bytes=\(result.stdout.count)")
+            return nil
+        }
         return try? JSONSerialization.jsonObject(with: result.stdout)
     }
 
@@ -269,15 +269,42 @@ enum PasteService {
         return paths.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    private static func sendViaWezterm(_ text: String, pane: String) -> Bool {
+    private static func sendViaWezterm(_ text: String, pane: String?) -> Bool {
         guard let binary = weztermBinary() else { return false }
+        var arguments = ["cli", "send-text"]
+        if let pane {
+            arguments += ["--pane-id", pane]
+        }
         let result = TimedProcess.run(
             executable: binary,
-            arguments: ["cli", "send-text", "--pane-id", pane],
+            arguments: arguments,
             stdin: Data(text.utf8),
-            timeout: 1.5
+            environment: weztermEnvironment(),
+            timeout: 3.0
         )
+        if result.status != 0 {
+            log("wezterm send-text status=\(result.status) pane=\(pane ?? "-")")
+        }
         return result.status == 0
+    }
+
+    private static func weztermEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        if env["WEZTERM_UNIX_SOCKET"] != nil { return env }
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/share/wezterm", isDirectory: true)
+        let socks = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let newest = socks
+            .filter { $0.lastPathComponent.hasPrefix("gui-sock-") }
+            .max { a, b in
+                let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return da < db
+            }
+        if let newest {
+            env["WEZTERM_UNIX_SOCKET"] = newest.path
+        }
+        return env
     }
 
     private enum FocusedField {
@@ -333,11 +360,15 @@ enum TimedProcess {
         executable: String,
         arguments: [String],
         stdin: Data? = nil,
+        environment: [String: String]? = nil,
         timeout: TimeInterval
     ) -> Result {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        if let environment {
+            process.environment = environment
+        }
         let out = Pipe()
         let input = Pipe()
         process.standardOutput = out
