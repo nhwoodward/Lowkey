@@ -293,18 +293,27 @@ final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }
 
-final class FlippedStackView: NSStackView {
-    override var isFlipped: Bool { true }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        guard !isHidden, bounds.contains(point) else { return nil }
-        for sub in arrangedSubviews.reversed() {
-            let local = convert(point, to: sub)
+// Apple's hitTest contract: `point` is in the receiver's superview.
+// Several views used to convert into the child's space and then call
+// hitTest, so clicks missed while tracking-area hover still fired.
+enum HitTesting {
+    static func deep(_ view: NSView, point: NSPoint, fallback: NSView?) -> NSView? {
+        guard !view.isHidden, view.alphaValue > 0.01, view.frame.contains(point) else { return nil }
+        let local = view.convert(point, from: view.superview)
+        for sub in view.subviews.reversed() {
             if let hit = sub.hitTest(local) {
                 return hit
             }
         }
-        return self
+        return fallback
+    }
+}
+
+final class FlippedStackView: NSStackView {
+    override var isFlipped: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        HitTesting.deep(self, point: point, fallback: self)
     }
 }
 
@@ -418,14 +427,7 @@ final class ThemedFillView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard !isHidden, bounds.contains(point) else { return nil }
-        for sub in subviews.reversed() {
-            let converted = convert(point, to: sub)
-            if let hit = sub.hitTest(converted) {
-                return hit
-            }
-        }
-        return self
+        HitTesting.deep(self, point: point, fallback: self)
     }
 
     private func paint() {

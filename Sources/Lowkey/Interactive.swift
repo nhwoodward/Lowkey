@@ -202,7 +202,7 @@ final class InteractiveButton: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard !isHidden, alphaValue > 0.01, bounds.contains(point) else { return nil }
+        guard !isHidden, alphaValue > 0.01, frame.contains(point) else { return nil }
         return self
     }
 
@@ -518,14 +518,7 @@ final class SettingsRow: NSView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { isInteractive }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard !isHidden, bounds.contains(point) else { return nil }
-        for sub in subviews.reversed() {
-            let local = convert(point, to: sub)
-            if let hit = sub.hitTest(local) {
-                return hit
-            }
-        }
-        return self
+        HitTesting.deep(self, point: point, fallback: self)
     }
 
     private func applyChrome(animated: Bool) {
@@ -617,8 +610,9 @@ final class InputField: NSView, NSTextFieldDelegate {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard !isHidden, bounds.contains(point) else { return nil }
-        let inField = convert(point, to: field)
+        guard !isHidden, frame.contains(point) else { return nil }
+        let local = convert(point, from: superview)
+        let inField = convert(local, to: field)
         if field.bounds.contains(inField) { return field }
         return self
     }
@@ -702,13 +696,7 @@ final class ListRow: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard bounds.contains(point) else { return nil }
-        for sub in subviews.reversed() {
-            if sub.frame.contains(point), let hit = sub.hitTest(convert(point, to: sub)) {
-                return hit
-            }
-        }
-        return self
+        HitTesting.deep(self, point: point, fallback: self)
     }
 
     private func applyChrome(animated: Bool) {

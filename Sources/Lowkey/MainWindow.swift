@@ -19,7 +19,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSTableV
 
     init(language: String) {
         self.language = language
-        let window = NSWindow(
+        let window = ChromeWindow(
             contentRect: NSRect(x: 0, y: 0, width: 980, height: 720),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
@@ -205,12 +205,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSTableV
         let motif = WaveMotifView()
         motif.translatesAutoresizingMaskIntoConstraints = false
 
-        let heading = NSTextField(labelWithString: "Say it out loud.")
+        let heading = PassthroughLabel(labelWithString: "Say it out loud.")
         heading.font = Theme.display(24, weight: .bold)
         heading.textColor = Theme.ink
         heading.translatesAutoresizingMaskIntoConstraints = false
 
-        let body = NSTextField(wrappingLabelWithString: "Hold your shortcut and talk. The words land wherever your cursor is, and nothing ever leaves this Mac.")
+        let body = PassthroughLabel(wrappingLabelWithString: "Hold your shortcut and talk. The words land wherever your cursor is, and nothing ever leaves this Mac.")
         body.font = NSFont.systemFont(ofSize: 13)
         body.textColor = Theme.inkMuted
         body.preferredMaxLayoutWidth = 460
@@ -431,13 +431,26 @@ final class HistoryTable: NSTableView {
 
     override func mouseDown(with event: NSEvent) {
         let local = convert(event.locationInWindow, from: nil)
-        if let button = hitTest(local) as? InteractiveButton {
+        if let button = interactiveButton(at: local) {
             trackingButton = button
             button.mouseDown(with: event)
             return
         }
         trackingButton = nil
         super.mouseDown(with: event)
+    }
+
+    private func interactiveButton(at point: NSPoint) -> InteractiveButton? {
+        func search(_ view: NSView, _ pointInTable: NSPoint) -> InteractiveButton? {
+            let local = view.convert(pointInTable, from: self)
+            guard view.bounds.contains(local) else { return nil }
+            if let button = view as? InteractiveButton { return button }
+            for sub in view.subviews.reversed() {
+                if let found = search(sub, pointInTable) { return found }
+            }
+            return nil
+        }
+        return search(self, point)
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -608,6 +621,29 @@ private final class HistoryRowView: NSTableCellView {
         layer?.shadowOpacity = lifted ? 0.08 : 0
         layer?.shadowRadius = 7
         layer?.shadowOffset = .zero
+    }
+}
+
+// Menu-bar apps stay inactive until something calls activate. Hover still
+// works because tracking areas use .activeAlways; clicks do not, unless
+// the window takes key and the click is delivered.
+final class ChromeWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+
+    override func sendEvent(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown, .rightMouseDown:
+            if !NSApp.isActive {
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            if !isKeyWindow {
+                makeKeyAndOrderFront(nil)
+            }
+        default:
+            break
+        }
+        super.sendEvent(event)
     }
 }
 

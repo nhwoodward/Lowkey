@@ -365,7 +365,7 @@ private final class RecentDictationRow: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        bounds.contains(point) ? self : nil
+        frame.contains(point) ? self : nil
     }
 
     private func applyChrome() {
