@@ -1,15 +1,62 @@
-# Whisperly
+<h1 align="center">Whisperly</h1>
 
-Local-only dictation for macOS. Hold Right Command, speak, release. Whisper
-small runs on the same Mac through `whisper-server` bound to `127.0.0.1`.
-No account. No analytics. No cloud.
+<p align="center">
+  <a href="#quick-start"><img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-111111?style=flat-square" /></a>
+  <a href="#what-it-is"><img alt="4 GB of RAM and up" src="https://img.shields.io/badge/RAM-4%20GB%2B-111111?style=flat-square" /></a>
+  <a href="#privacy"><img alt="Loopback only" src="https://img.shields.io/badge/engine-127.0.0.1-111111?style=flat-square" /></a>
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" /></a>
+</p>
 
-Licensed under the [MIT License](LICENSE).
+<h3 align="center">Hold a key. Speak. Stay on this Mac.</h3>
 
-## Install
+<p align="center">
+  Local Whisper dictation for machines with 4 GB of RAM and up.
+  No account. No analytics. No cloud.
+</p>
 
-Needs [Homebrew](https://brew.sh) and the Xcode Command Line Tools. First run
-downloads the small Whisper model (~466 MB) and builds the app.
+<p align="center">
+  <img alt="Whisperly: hold a key, speak, stay on this Mac" src="docs/images/banner.png" width="100%" />
+</p>
+
+## What it is
+
+Cloud dictation wants an account, a subscription, and a machine that can host a large model. On a 4 GB Mac that is the whole computer.
+
+Whisperly flips that.
+
+Hold **Right Command**, talk, let go. Whisper **small** runs on the same Mac through `whisper-server` bound to `127.0.0.1`. The words land wherever the cursor is. There is no account, no analytics, and no network call except that local server.
+
+It is built for **low-memory Macs** on purpose: a ~466 MB model, four decode threads, and no leftover decoder context from the last utterance. That is why it stays quick on 4 GB machines instead of asking you to buy more RAM.
+
+<p align="center">
+  <img alt="Whisperly dictation window" src="docs/images/window.png" width="86%" />
+</p>
+
+## Features
+
+- **Hold to talk** - Right Command by default. Switch to Left Command, Right Option, or Fn. Press **Esc** while holding to discard the take.
+- **Small on purpose** - `ggml-small.bin`, four threads, max-context 0. Light enough for a 4 GB Mac. Fast enough that short clips do not pile up.
+- **Loopback only** - the engine is forced onto `127.0.0.1`. Editing `config.json` cannot point it at the network.
+- **Paste, then keep the words** - a keystroke paste into the focused app. If paste cannot land, the transcript is still on the clipboard.
+- **Your names, your phrases** - custom vocabulary for names and spelling, plus spoken snippets that expand into saved text.
+- **History stays here** - replay, recopy, or delete. Audio and transcripts live under Application Support, not this repository.
+- **Menu bar, not a dock hog** - hide from the Dock, start at login, optionally pause Music or Spotify while you talk.
+- **Hardened Runtime** - local builds are signed with a self-signed `Whisperly Local` identity so Microphone and Accessibility survive rebuilds.
+
+<p align="center">
+  <img alt="General settings" src="docs/images/settings.png" width="48%" />
+  <img alt="Dictation settings" src="docs/images/settings-dictation.png" width="48%" />
+</p>
+
+## Quick Start
+
+### Requirements
+
+- macOS 14 or later
+- About 4 GB of RAM or more
+- [Homebrew](https://brew.sh) and the Xcode Command Line Tools
+
+The first run downloads `ggml-small.bin` (~466 MB) and builds the app.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nhwoodward/Whisperly/main/Scripts/install.sh | zsh
@@ -21,23 +68,37 @@ Or from a clone:
 ./Scripts/install.sh
 ```
 
-Then grant Microphone and Accessibility when macOS asks. Hold **Right Command**,
-speak, release. Press **Esc** while holding to discard.
+Then grant **Microphone** and **Accessibility** when macOS asks. Hold **Right Command**, speak, release. Press **Esc** while holding to discard.
 
-## Use
+## How it works
 
-1. Hold **Right Command** (or the shortcut you set), talk, let go.
-2. The Flow Bar shows a live waveform, then a spinner, then a check when the words are ready.
-3. Press **Esc** while holding the shortcut to discard the current recording.
-4. Text is pasted into the focused app. If paste is blocked, the transcript stays on the clipboard.
+```
+        you hold Right Command
+                  │
+                  ▼
+        ┌──────────────────┐
+        │ Flow Bar         │  live waveform while you talk
+        └────────┬─────────┘
+                 ▼
+        ┌──────────────────┐
+        │ whisper-server   │  127.0.0.1:18789 only
+        │ ggml-small.bin   │  4 threads, max-context 0
+        └────────┬─────────┘
+                 ▼
+        words paste at the cursor
+        clipboard is the failsafe
+```
+
+You talk to one shortcut. Whisperly records 16 kHz PCM on this Mac, posts it to the local engine, then pastes the transcript into the app that had focus. If that app will not take a paste, Cmd+V still has the same text.
 
 ## Privacy
 
-Audio and transcripts stay on the Mac. The engine listens only on
-`127.0.0.1`. There is no account, no analytics, and no network call
-except that local server. History and logs live under
-`~/Library/Application Support/Whisperly/` and are not part of this
-repository.
+Audio and transcripts stay on the Mac.
+
+- The engine listens only on `127.0.0.1`. There is no account, no analytics, and no outbound call for transcription.
+- `~/Library/Application Support/Whisperly/` is created mode `700`. History, the model, config, and logs live there. They are not part of this repository.
+- Signing keys stay in Application Support. They are gitignored.
+- Hardened Runtime is on. The entitlements are microphone input and Apple Events for paste, nothing else.
 
 ## Files
 
@@ -55,13 +116,9 @@ open ~/Applications/Whisperly.app
 
 ## Signing
 
-Local builds use **Hardened Runtime** and a self-signed `Whisperly Local`
-certificate so Microphone and Accessibility stay granted across rebuilds.
-Signing keys stay in Application Support and are not in this repo.
+Local builds use **Hardened Runtime** and a self-signed `Whisperly Local` certificate so Microphone and Accessibility stay granted across rebuilds. Signing keys stay in Application Support and are not in this repo.
 
-**Notarization** is a separate Apple scan for giving the app to other Macs.
-It needs a paid Apple Developer Program membership and a Developer ID
-certificate:
+**Notarization** is a separate Apple scan for giving the app to other Macs. It needs a paid Apple Developer Program membership and a Developer ID certificate:
 
 ```bash
 xcrun notarytool store-credentials whisperly-notary \
@@ -70,3 +127,6 @@ xcrun notarytool store-credentials whisperly-notary \
 ./Scripts/notarize.sh
 ```
 
+## License
+
+MIT. See [LICENSE](LICENSE).
