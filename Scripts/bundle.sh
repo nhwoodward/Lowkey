@@ -19,16 +19,26 @@ if [ -f "$ROOT/Resources/AppIcon.icns" ]; then
 fi
 chmod +x "$APP/Contents/MacOS/Whisperly"
 
-IDENT="Whisperly Local"
-# find-identity -v hides this cert as untrusted, but codesign still accepts it
-# and produces a stable designated requirement. That is what TCC keys off.
-if security find-identity -p codesigning 2>/dev/null | grep -q "${IDENT}"; then
-    codesign --force --deep --sign "${IDENT}" \
+# Prefer a paid Developer ID if one exists. Otherwise keep the stable
+# "Whisperly Local" identity so TCC (mic / Accessibility) does not reset.
+IDENT=""
+TIMESTAMP=()
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
+    IDENT="$(security find-identity -v -p codesigning | awk -F'"' '/Developer ID Application/{print $2; exit}')"
+    TIMESTAMP=(--timestamp)
+elif security find-identity -p codesigning 2>/dev/null | grep -q "Whisperly Local"; then
+    IDENT="Whisperly Local"
+fi
+
+if [ -n "${IDENT}" ]; then
+    codesign --force --deep --options runtime \
+        --sign "${IDENT}" \
         --identifier app.whisperly.local \
         --entitlements "$ROOT/Whisperly.entitlements" \
+        "${TIMESTAMP[@]}" \
         "$APP" >/dev/null
 else
-    codesign --force --deep --sign - "$APP" >/dev/null
+    codesign --force --deep --options runtime --sign - "$APP" >/dev/null
 fi
 
 INSTALL="$HOME/Applications/Whisperly.app"
@@ -37,4 +47,4 @@ cp -R "$APP" "$INSTALL"
 
 echo "Built $APP"
 echo "Installed $INSTALL"
-echo "Signed with: $(codesign -dv "$INSTALL" 2>&1 | awk -F= '/Authority|Signature|Identifier/{print}')"
+echo "Signed with: $(codesign -dv "$INSTALL" 2>&1 | awk -F= '/Authority|Signature|Identifier|TeamIdentifier|CodeDirectory/{print}')"

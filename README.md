@@ -25,3 +25,21 @@ Local-only dictation for this Mac. Hold Right Command, speak, release. Whisper s
 ./Scripts/bundle.sh
 open ~/Applications/Whisperly.app
 ```
+
+## Signing
+
+The installed app uses **Hardened Runtime**: macOS restrictions that block
+unsigned code injection. It is signed with the local `Whisperly Local`
+certificate so Microphone and Accessibility stay granted across rebuilds.
+
+**Notarization** is a separate Apple scan. It needs a paid Apple Developer
+Program membership and a Developer ID certificate. This Mac has a free
+Personal Team, which cannot notarize. When you have a paid team:
+
+```bash
+xcrun notarytool store-credentials whisperly-notary \
+  --apple-id YOUR_APPLE_ID --team-id YOUR_TEAM_ID --password APP_SPECIFIC_PASSWORD
+./Scripts/bundle.sh
+./Scripts/notarize.sh
+```
+
