@@ -56,15 +56,23 @@ It is built for **low-memory Macs** on purpose: a ~466 MB model, four decode thr
 - About 8 GB of RAM or more
 - [Homebrew](https://brew.sh) and the Xcode Command Line Tools
 
-The first run downloads `ggml-small.bin` (~466 MB) and builds the app.
+### Download the latest release (recommended)
+
+GitHub Releases contain prebuilt apps for both Apple silicon and Intel Macs. The release installer downloads the correct app, installs the local Whisper engine, and downloads the model on first install. It does not clone the repository or compile Swift:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nhwoodward/Lowkey/main/Scripts/install.sh | zsh
+curl -fsSL https://raw.githubusercontent.com/nhwoodward/Lowkey/main/Scripts/install-release.sh | zsh
 ```
 
-Or from a clone:
+You can also download an archive manually from the [Releases page](https://github.com/nhwoodward/Lowkey/releases/latest): choose `Lowkey-arm64.zip` for Apple silicon or `Lowkey-x86_64.zip` for Intel. The installer script is recommended because the app also needs `whisper-server` and `ggml-small.bin`.
+
+### Build from source
+
+If you want to work on Lowkey or build locally:
 
 ```bash
+git clone https://github.com/nhwoodward/Lowkey.git
+cd Lowkey
 ./Scripts/install.sh
 ```
 
@@ -114,11 +122,29 @@ Audio and transcripts stay on the Mac.
 open ~/Applications/Lowkey.app
 ```
 
+To create a release archive locally:
+
+```bash
+LOWKEY_VERSION=1.0.0 ./Scripts/package-release.sh
+```
+
+The GitHub Actions workflow at `.github/workflows/release.yml` builds `Lowkey-arm64.zip` and `Lowkey-x86_64.zip` whenever a `v*` tag is pushed. It also supports manually creating a release from the Actions tab.
+
 ## Signing
 
 Local builds use **Hardened Runtime** and a self-signed `Lowkey Local` certificate so Microphone and Accessibility stay granted across rebuilds. Signing keys stay in Application Support and are not in this repo.
 
-**Notarization** is a separate Apple scan for giving the app to other Macs. It needs a paid Apple Developer Program membership and a Developer ID certificate:
+Release builds are ad-hoc signed by default so the workflow can run without private Apple credentials. macOS may require a user to right-click an unsigned/unnotarized release and choose **Open** the first time. For a no-warning download, configure these repository secrets with a paid Apple Developer **Developer ID Application** certificate:
+
+- `DEVELOPER_ID_CERTIFICATE_BASE64` - base64-encoded `.p12` export
+- `DEVELOPER_ID_CERTIFICATE_PASSWORD` - the `.p12` password
+- `LOWKEY_NOTARY_APPLE_ID` - Apple ID used for notarization
+- `LOWKEY_NOTARY_TEAM_ID` - Apple Developer Team ID
+- `LOWKEY_NOTARY_PASSWORD` - Apple app-specific password
+
+For example, encode the certificate locally with `base64 -i DeveloperID.p12 | pbcopy`, then paste it into the first secret. The workflow imports the certificate, notarizes, staples, and publishes the final archive automatically.
+
+**Notarization** requires a paid Apple Developer Program membership:
 
 ```bash
 xcrun notarytool store-credentials lowkey-notary \

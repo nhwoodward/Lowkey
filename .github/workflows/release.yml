@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (for example 1.0.0)"
+        required: true
+        default: "1.0.0"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  # Tags are the source of truth for normal releases. A manually dispatched
+  # build uses the version input instead.
+  RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-13
+            arch: x86_64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Import Developer ID certificate when configured
+        shell: bash
+        env:
+          DEVELOPER_ID_CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+        run: |
+          if [[ -z "${DEVELOPER_ID_CERTIFICATE_BASE64:-}" ]]; then
+            echo "No Developer ID certificate configured; building an ad-hoc-signed archive."
+            exit 0
+          fi
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/lowkey-build.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          CERT_PATH="$RUNNER_TEMP/developer-id.p12"
+
+          echo "$DEVELOPER_ID_CERTIFICATE_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$DEVELOPER_ID_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F'"' '/Developer ID Application/{print $2; exit}')"
+          if [[ -z "$IDENTITY" ]]; then
+            echo "The configured certificate is not a Developer ID Application certificate." >&2
+            exit 1
+          fi
+          echo "LOWKEY_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Build and package app
+        env:
+          LOWKEY_VERSION: ${{ env.RELEASE_VERSION }}
+          LOWKEY_OUTPUT_DIR: ${{ runner.temp }}/lowkey-release
+          LOWKEY_NOTARY_APPLE_ID: ${{ secrets.LOWKEY_NOTARY_APPLE_ID }}
+          LOWKEY_NOTARY_TEAM_ID: ${{ secrets.LOWKEY_NOTARY_TEAM_ID }}
+          LOWKEY_NOTARY_PASSWORD: ${{ secrets.LOWKEY_NOTARY_PASSWORD }}
+        run: ./Scripts/package-release.sh
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lowkey-${{ matrix.arch }}
+          path: ${{ runner.temp }}/lowkey-release/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            TAG="v${INPUT_VERSION#v}"
+          else
+            TAG="$REF_NAME"
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            gh release create "$TAG" release-assets/* \
+              --title "Lowkey ${TAG#v}" \
+              --generate-notes
+          fi
