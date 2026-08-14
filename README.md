@@ -37,7 +37,7 @@ It is built for **low-memory Macs** on purpose: a ~466 MB model, four decode thr
 - **Hold to talk** - Right Command by default. Switch to Left Command, Right Option, or Fn. Press **Esc** while holding to discard the take.
 - **Small on purpose** - `ggml-small.bin`, four threads, max-context 0. Light enough for an 8 GB Mac. Fast enough that short clips do not pile up.
 - **Loopback only** - the engine is forced onto `127.0.0.1`. Editing `config.json` cannot point it at the network.
-- **Paste, then keep the words** - a keystroke paste into the focused app. If paste cannot land, the transcript is still on the clipboard.
+- **Paste, then keep the words** - sends directly to the focused WezTerm pane when WezTerm is active, or uses a keystroke paste elsewhere. If delivery cannot land, the transcript is still on the clipboard.
 - **Your names, your phrases** - custom vocabulary for names and spelling, plus spoken snippets that expand into saved text.
 - **History stays here** - replay, recopy, or delete. Audio and transcripts live under Application Support, not this repository.
 - **Menu bar, not a dock hog** - hide from the Dock, start at login, optionally pause Music or Spotify while you talk.
@@ -89,7 +89,7 @@ Then grant **Microphone** and **Accessibility** when macOS asks. Hold **Right Co
         clipboard is the failsafe
 ```
 
-You talk to one shortcut. Lowkey records 16 kHz PCM on this Mac, posts it to the local engine, then pastes the transcript into the app that had focus. If that app will not take a paste, Cmd+V still has the same text.
+You talk to one shortcut. Lowkey records 16 kHz PCM on this Mac, posts it to the local engine, then delivers the transcript to the app that had focus. WezTerm receives it through its CLI; other apps receive a keystroke paste. If delivery will not land, Cmd+V still has the same text.
 
 ## Privacy
 
