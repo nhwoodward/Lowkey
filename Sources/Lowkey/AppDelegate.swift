@@ -99,10 +99,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func resolveWeztermPane() {
         guard pasteTarget?.isWezTerm == true else { return }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let pane = PasteService.focusedWeztermPane()
+            let info = PasteService.focusedWeztermPaneInfo()
             DispatchQueue.main.async {
                 guard let self, self.pasteTarget?.isWezTerm == true else { return }
-                self.pasteTarget?.weztermPaneID = pane
+                self.pasteTarget?.weztermPaneID = info?.id
+                self.pasteTarget?.weztermSocket = info?.socket
             }
         }
     }

@@ -7,6 +7,7 @@ struct PasteTarget {
     let bundleIdentifier: String
     let localizedName: String
     var weztermPaneID: String?
+    var weztermSocket: String?
 
     // Deliberately cheap: no process spawns. This runs on the main thread the
     // instant recording starts. The wezterm pane, which needs a CLI call, is
@@ -17,7 +18,8 @@ struct PasteTarget {
             pid: front?.processIdentifier ?? 0,
             bundleIdentifier: front?.bundleIdentifier ?? "",
             localizedName: front?.localizedName ?? "",
-            weztermPaneID: nil
+            weztermPaneID: nil,
+            weztermSocket: nil
         )
     }
 
@@ -66,9 +68,28 @@ enum PasteService {
             let previous = DispatchQueue.main.sync { writeClipboard(text) }
 
             if destination.isWezTerm {
-                let pane = destination.weztermPaneID ?? focusedWeztermPane()
-                if sendViaWezterm(text, pane: pane) {
+                let routing = weztermRouting()
+                let pane: String?
+                if let capturedPane = destination.weztermPaneID,
+                   let routing,
+                   destination.weztermSocket == routing.socket {
+                    pane = capturedPane
+                } else {
+                    pane = routing.flatMap { focusedWeztermPane(using: $0) }
+                }
+
+                if let routing, sendViaWezterm(text, pane: pane, routing: routing) {
                     log("wezterm send-text pane=\(pane ?? "active")")
+                    finishOnMain(previous, clipboard: clipboard, expected: text, outcome: .unknown, completion: completion)
+                    return
+                }
+
+                if let routing,
+                   let refreshed = weztermRouting(),
+                   refreshed.socket != routing.socket,
+                   let refreshedPane = focusedWeztermPane(using: refreshed),
+                   sendViaWezterm(text, pane: refreshedPane, routing: refreshed) {
+                    log("wezterm send-text pane=\(refreshedPane)")
                     finishOnMain(previous, clipboard: clipboard, expected: text, outcome: .unknown, completion: completion)
                     return
                 }
@@ -140,9 +161,33 @@ enum PasteService {
         }
     }
 
-    static func focusedWeztermPane() -> String? {
+    private struct WeztermRouting {
+        let binary: String
+        let environment: [String: String]
+
+        var socket: String? {
+            environment["WEZTERM_UNIX_SOCKET"]
+        }
+    }
+
+    private static func weztermRouting() -> WeztermRouting? {
         guard let binary = weztermBinary() else { return nil }
-        guard let clients = runJSON(binary, ["cli", "list-clients", "--format", "json"], timeout: 3.0) as? [[String: Any]] else {
+        return WeztermRouting(binary: binary, environment: weztermEnvironment())
+    }
+
+    static func focusedWeztermPane() -> String? {
+        focusedWeztermPaneInfo()?.id
+    }
+
+    static func focusedWeztermPaneInfo() -> (id: String, socket: String?)? {
+        guard let routing = weztermRouting(), let id = focusedWeztermPane(using: routing) else {
+            return nil
+        }
+        return (id: id, socket: routing.socket)
+    }
+
+    private static func focusedWeztermPane(using routing: WeztermRouting) -> String? {
+        guard let clients = runJSON(routing.binary, ["cli", "list-clients", "--format", "json"], timeout: 3.0, environment: routing.environment) as? [[String: Any]] else {
             log("wezterm list-clients failed")
             return nil
         }
@@ -170,11 +215,16 @@ enum PasteService {
         return Double.greatestFiniteMagnitude
     }
 
-    private static func runJSON(_ binary: String, _ arguments: [String], timeout: TimeInterval) -> Any? {
+    private static func runJSON(
+        _ binary: String,
+        _ arguments: [String],
+        timeout: TimeInterval,
+        environment: [String: String]
+    ) -> Any? {
         let result = TimedProcess.run(
             executable: binary,
             arguments: arguments,
-            environment: weztermEnvironment(),
+            environment: environment,
             timeout: timeout
         )
         guard result.status == 0, !result.stdout.isEmpty else {
@@ -269,17 +319,16 @@ enum PasteService {
         return paths.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    private static func sendViaWezterm(_ text: String, pane: String?) -> Bool {
-        guard let binary = weztermBinary() else { return false }
+    private static func sendViaWezterm(_ text: String, pane: String?, routing: WeztermRouting) -> Bool {
         var arguments = ["cli", "send-text"]
         if let pane {
             arguments += ["--pane-id", pane]
         }
         let result = TimedProcess.run(
-            executable: binary,
+            executable: routing.binary,
             arguments: arguments,
             stdin: Data(text.utf8),
-            environment: weztermEnvironment(),
+            environment: routing.environment,
             timeout: 3.0
         )
         if result.status != 0 {
@@ -288,19 +337,55 @@ enum PasteService {
         return result.status == 0
     }
 
+    private static func isLiveWeztermSocket(at path: String) -> Bool {
+        let bytes = Array(path.utf8)
+        var address = sockaddr_un()
+        let capacity = MemoryLayout.size(ofValue: address.sun_path)
+        guard !bytes.isEmpty, bytes.count < capacity else { return false }
+
+        withUnsafeMutableBytes(of: &address.sun_path) { buffer in
+            for (index, byte) in bytes.enumerated() {
+                buffer[index] = byte
+            }
+        }
+        address.sun_family = sa_family_t(AF_UNIX)
+
+        let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { return false }
+        defer { Darwin.close(descriptor) }
+        return withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { addressPointer in
+                Darwin.connect(descriptor, addressPointer, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0
+            }
+        }
+    }
+
     private static func weztermEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
-        if env["WEZTERM_UNIX_SOCKET"] != nil { return env }
+        env.removeValue(forKey: "WEZTERM_PANE")
+
+        if let inherited = env["WEZTERM_UNIX_SOCKET"], isLiveWeztermSocket(at: inherited) {
+            return env
+        }
+        env.removeValue(forKey: "WEZTERM_UNIX_SOCKET")
+
         let dir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/share/wezterm", isDirectory: true)
-        let socks = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let socks = (try? FileManager.default.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        )) ?? []
         let newest = socks
-            .filter { $0.lastPathComponent.hasPrefix("gui-sock-") }
+            .filter {
+                $0.lastPathComponent.hasPrefix("gui-sock-") &&
+                isLiveWeztermSocket(at: $0.path)
+            }
             .max { a, b in
                 let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
                 let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
                 return da < db
             }
+
         if let newest {
             env["WEZTERM_UNIX_SOCKET"] = newest.path
         }
