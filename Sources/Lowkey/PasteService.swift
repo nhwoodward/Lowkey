@@ -290,19 +290,37 @@ enum PasteService {
 
     private static func weztermEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
-        if env["WEZTERM_UNIX_SOCKET"] != nil { return env }
+
+        // A GUI app can outlive the terminal that launched it. These values
+        // are a snapshot from that terminal session, so an old WezTerm GUI
+        // restart can leave us pointing at a dead socket and pane. Always
+        // refresh the socket and discard the inherited pane instead of
+        // trusting stale process environment.
+        env.removeValue(forKey: "WEZTERM_PANE")
+
         let dir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/share/wezterm", isDirectory: true)
-        let socks = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let socks = (try? FileManager.default.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        )) ?? []
         let newest = socks
-            .filter { $0.lastPathComponent.hasPrefix("gui-sock-") }
+            .filter {
+                $0.lastPathComponent.hasPrefix("gui-sock-") &&
+                FileManager.default.fileExists(atPath: $0.path)
+            }
             .max { a, b in
                 let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
                 let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
                 return da < db
             }
+
         if let newest {
             env["WEZTERM_UNIX_SOCKET"] = newest.path
+        } else {
+            // Let WezTerm use its normal mux socket if no GUI socket exists.
+            // In particular, never retain a dead inherited socket path.
+            env.removeValue(forKey: "WEZTERM_UNIX_SOCKET")
         }
         return env
     }
