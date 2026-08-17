@@ -48,6 +48,21 @@ enum ClipboardBehavior: String, Codable, CaseIterable {
     }
 }
 
+enum TranscriptionEngineKind: String, Codable, CaseIterable {
+    // Parakeet TDT on the Neural Engine: fastest, immune to GPU contention
+    // and thermal throttling. Whisper (whisper-server on GPU) remains as
+    // the fallback and the choice for non-English dictation.
+    case parakeet
+    case whisper
+
+    var title: String {
+        switch self {
+        case .parakeet: return "Parakeet (Neural Engine)"
+        case .whisper: return "Whisper (GPU)"
+        }
+    }
+}
+
 enum PunctuationMode: String, Codable, CaseIterable {
     case automatic
     case none
@@ -61,6 +76,7 @@ enum PunctuationMode: String, Codable, CaseIterable {
 }
 
 struct Config: Codable {
+    var engine: TranscriptionEngineKind
     var modelPath: String
     var whisperServerPath: String
     var host: String
@@ -189,12 +205,15 @@ struct Config: Codable {
         }
         let named = modelsDirectory.appendingPathComponent((preferred as NSString).lastPathComponent).path
         if fm.fileExists(atPath: named) { return named }
-        let fallback = modelsDirectory.appendingPathComponent("ggml-small.bin").path
-        if fm.fileExists(atPath: fallback) { return fallback }
+        for candidate in ["ggml-small.en-q5_1.bin", "ggml-small.bin"] {
+            let fallback = modelsDirectory.appendingPathComponent(candidate).path
+            if fm.fileExists(atPath: fallback) { return fallback }
+        }
         return preferred
     }
 
     init(
+        engine: TranscriptionEngineKind = .parakeet,
         modelPath: String,
         whisperServerPath: String,
         host: String,
@@ -213,6 +232,7 @@ struct Config: Codable {
         punctuationMode: PunctuationMode,
         appearance: AppAppearance
     ) {
+        self.engine = engine
         self.modelPath = modelPath
         self.whisperServerPath = whisperServerPath
         self.host = host
@@ -234,7 +254,7 @@ struct Config: Codable {
 
     static func makeDefault() -> Config {
         Config(
-            modelPath: modelsDirectory.appendingPathComponent("ggml-small.bin").path,
+            modelPath: modelsDirectory.appendingPathComponent("ggml-small.en-q5_1.bin").path,
             whisperServerPath: resolvedWhisperServerPath(preferred: "/opt/homebrew/bin/whisper-server"),
             host: "127.0.0.1",
             port: 18789,
@@ -257,6 +277,7 @@ struct Config: Codable {
     init(from decoder: Decoder) throws {
         let fallback = Config.makeDefault()
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        engine = try c.decodeIfPresent(TranscriptionEngineKind.self, forKey: .engine) ?? fallback.engine
         modelPath = try c.decodeIfPresent(String.self, forKey: .modelPath) ?? fallback.modelPath
         whisperServerPath = try c.decodeIfPresent(String.self, forKey: .whisperServerPath) ?? fallback.whisperServerPath
         host = try c.decodeIfPresent(String.self, forKey: .host) ?? fallback.host

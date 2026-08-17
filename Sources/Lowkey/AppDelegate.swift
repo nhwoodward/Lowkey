@@ -37,14 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hotkey.onHoldStart = { [weak self] in self?.beginHold() }
         hotkey.onHoldEnd = { [weak self] in self?.endHold() }
         hotkey.start()
-        engine.start(config: config) { [weak self] ok in
-            guard let self else { return }
-            if !ok {
-                self.flowBar.setMode(.failed(self.engine.lastError ?? "Engine failed"))
-            }
-            self.refreshMenu()
-            self.settings?.refreshStatus(engineReady: ok, engineError: self.engine.lastError)
-        }
+        startEngines()
         setupDebugUI()
     }
 
@@ -60,6 +53,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hotkey.hotkey = config.hotkey
     }
 
+    // Parakeet (Neural Engine) is the primary engine. Whisper starts
+    // alongside it so dictation works during Parakeet's first-run model
+    // download and ANE compile, then retires once Parakeet is confirmed
+    // ready. If Parakeet fails to load, whisper simply stays.
+    private func startEngines() {
+        let whisperIsPrimary = config.engine == .whisper
+        engine.start(config: config) { [weak self] ok in
+            guard let self else { return }
+            if whisperIsPrimary || !ParakeetEngine.shared.ready {
+                if !ok {
+                    self.flowBar.setMode(.failed(self.engine.lastError ?? "Engine failed"))
+                }
+                self.refreshMenu()
+                self.settings?.refreshStatus(engineReady: ok, engineError: self.engine.lastError)
+                if ok {
+                    Transcriber.warmUp(config: self.config)
+                }
+            }
+        }
+        guard !whisperIsPrimary else { return }
+        ParakeetEngine.shared.start { [weak self] ok in
+            guard let self else { return }
+            if ok {
+                DispatchQueue.global(qos: .utility).async { [weak self] in
+                    self?.engine.stop()
+                    AppLog.line("whisper-server retired; parakeet active")
+                }
+                self.settings?.refreshStatus(engineReady: true, engineError: nil)
+            } else {
+                AppLog.line("parakeet unavailable, staying on whisper: \(ParakeetEngine.shared.lastError ?? "unknown")")
+            }
+            self.refreshMenu()
+        }
+    }
+
     private func restBar() {
         flowBar.restingMode = config.showBarAlways ? .idle : .hidden
         flowBar.setMode(flowBar.restingMode)
@@ -70,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if busy {
             if flowBar.mode == .working {
                 AppLog.line("hold ignored busy=working")
+                flowBar.nudge()
             } else {
                 AppLog.line("hold ignored busy")
                 flowBar.setMode(.failed("Still working"))
@@ -90,6 +119,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             pasteTarget = PasteTarget.capture()
             resolveWeztermPane()
             MediaPause.pauseIfNeeded(enabled: config.autoPauseAudio)
+            // Heat the transcription path while the user is still speaking.
+            Transcriber.warmUp(config: config)
         } catch {
             pasteTarget = nil
             flowBar.setMode(.failed(error.localizedDescription))
