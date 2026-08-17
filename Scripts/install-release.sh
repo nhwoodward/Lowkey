@@ -7,8 +7,10 @@ set -euo pipefail
 
 REPO="${LOWKEY_REPO:-nhwoodward/Lowkey}"
 SUPPORT="${HOME}/Library/Application Support/Lowkey"
-MODEL="${SUPPORT}/models/ggml-small.bin"
-MODEL_URL="${LOWKEY_MODEL_URL:-https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin}"
+# Whisper is the fallback engine; Parakeet (the primary engine, on the
+# Neural Engine) downloads its own weights on first launch.
+MODEL="${SUPPORT}/models/ggml-small.en-q5_1.bin"
+MODEL_URL="${LOWKEY_MODEL_URL:-https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en-q5_1.bin}"
 APP_URL="${LOWKEY_APP_URL:-https://github.com/${REPO}/releases/latest/download/Lowkey-$(uname -m).zip}"
 MIN_MODEL_BYTES=100000000
 
@@ -35,7 +37,7 @@ if ! xcode-select -p >/dev/null 2>&1; then
 fi
 
 if ! command -v whisper-server >/dev/null 2>&1; then
-    info "Installing whisper-cpp (local Whisper engine)"
+    info "Installing whisper-cpp (local fallback engine)"
     brew install whisper-cpp
 fi
 
@@ -64,7 +66,7 @@ if [[ -f "${MODEL}" ]]; then
 fi
 
 if (( need_model )); then
-    info "Downloading ggml-small.bin (~466 MB). This happens once."
+    info "Downloading ggml-small.en-q5_1.bin (~181 MB) for the fallback engine. This happens once."
     model_tmp="$(mktemp "${TMP}/lowkey-model.XXXXXX")"
     curl -fL --progress-bar -o "$model_tmp" "$MODEL_URL"
     bytes="$(stat -f %z "$model_tmp" 2>/dev/null || echo 0)"
@@ -83,5 +85,6 @@ open "${HOME}/Applications/Lowkey.app"
 
 print -r -- ""
 print -r -- "Lowkey is installed."
+print -r -- "First launch downloads the Parakeet model (~500 MB, once); Whisper covers dictation until it lands."
 print -r -- "Hold Right Command, speak, release."
 print -r -- "Grant Microphone and Accessibility when macOS asks."

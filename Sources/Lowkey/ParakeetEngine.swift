@@ -33,6 +33,14 @@ final class ParakeetEngine {
             DispatchQueue.main.async { completion(true) }
             return
         }
+        #if arch(x86_64)
+        // Intel Macs have no Neural Engine; a 0.6b CoreML model on CPU
+        // would be slower than whisper. Decline so whisper stays primary.
+        stateQueue.sync { lastError = "Parakeet needs Apple Silicon" }
+        AppLog.line("parakeet skipped: no Neural Engine on Intel")
+        DispatchQueue.main.async { completion(false) }
+        return
+        #endif
         Task.detached(priority: .userInitiated) {
             do {
                 let started = Date()
