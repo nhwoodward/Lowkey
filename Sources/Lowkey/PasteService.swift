@@ -64,7 +64,6 @@ enum PasteService {
             log("insert len=\(text.count) app=\(destination.localizedName) pane=\(destination.weztermPaneID ?? "-") trusted=\(isTrusted()) clipboard=\(clipboard.rawValue)")
 
             // Always park the transcript on the clipboard first.
-            let focus = DispatchQueue.main.sync { FocusedField.probe() }
             let previous = DispatchQueue.main.sync { writeClipboard(text) }
 
             if destination.isWezTerm {
@@ -98,6 +97,13 @@ enum PasteService {
 
             Thread.sleep(forTimeInterval: prePasteDelay)
             waitForModifiersToClear()
+
+            // Probe only on the keystroke path, where the answer is actually
+            // consumed, and only from this background thread. paste.log showed
+            // 6-7s freezes when this ran under DispatchQueue.main.sync: the AX
+            // round trip to WezTerm hit its 6s default timeout while the main
+            // thread sat blocked.
+            let focus = FocusedField.probe()
 
             // PASTE CONTRACT: never skip the keystroke because a probe
             // failed. AX lies for WezTerm, Zen, Notes, and Chromium.
@@ -136,7 +142,7 @@ enum PasteService {
 
     private static func detectKeystrokeOutcome(before: String?, text: String) -> PasteOutcome {
         Thread.sleep(forTimeInterval: 0.08)
-        let after = DispatchQueue.main.sync { FocusedField.probe() }
+        let after = FocusedField.probe()
         guard after.hasFocus, let value = after.value else {
             // No readable field. The keystroke may still have landed
             // (terminal, Chromium). Keep the clipboard; do not alarm.
@@ -400,6 +406,11 @@ enum PasteService {
 
         static func probe() -> Probe {
             let system = AXUIElementCreateSystemWide()
+            // Cap every AX round trip at half a second. The system default is
+            // 6 seconds, and an app that ignores AX (WezTerm, Chromium) makes
+            // the caller eat all of it. A lost answer is fine: unknown already
+            // means "keep the clipboard, don't alarm".
+            AXUIElementSetMessagingTimeout(system, 0.5)
             var focused: CFTypeRef?
             guard AXUIElementCopyAttributeValue(
                 system,
@@ -409,6 +420,7 @@ enum PasteService {
                 return Probe(hasFocus: false, value: nil)
             }
             let element = focused as! AXUIElement
+            AXUIElementSetMessagingTimeout(element, 0.5)
             var role: CFTypeRef?
             _ = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
             let roleName = role as? String ?? ""
