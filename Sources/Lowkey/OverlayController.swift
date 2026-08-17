@@ -94,6 +94,26 @@ final class FlowBarController {
         chrome.resetTransition()
     }
 
+    // A quick swell of the working pill: feedback for a hotkey press that
+    // arrived while the previous dictation is still transcribing, which used
+    // to be swallowed silently.
+    func nudge() {
+        guard let panel, mode == .working, !hugging else { return }
+        let resting = frame(for: size(for: mode))
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().setFrame(resting.insetBy(dx: -4, dy: -4), display: true)
+        } completionHandler: { [weak self] in
+            guard let self, let panel = self.panel else { return }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.16
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                panel.animator().setFrame(self.frame(for: self.size(for: self.mode)), display: true)
+            }
+        }
+    }
+
     private func hugIntoLoader() {
         guard let panel else { return }
         hugging = true
