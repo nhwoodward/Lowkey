@@ -148,7 +148,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         addMenuRow("circle.lefthalf.filled", NSColor.systemIndigo, "Appearance", "Follow the Mac, or lock light or dark", AppAppearance.allCases.map(\.title), AppAppearance.allCases.firstIndex(of: draft.appearance) ?? 0, #selector(changeAppearance(_:)))
         addMicRow()
         addActionRow("viewfinder", NSColor.systemPink, "Permissions", "Manage microphone and Accessibility", "Configure", #selector(openPermissions))
-        addInfoRow("info.circle.fill", NSColor.systemBlue, "Version", "Lowkey 1.0.0  ·  local Whisper")
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.0.0"
+        addInfoRow("info.circle.fill", NSColor.systemBlue, "Version", "Lowkey \(version)  ·  on-device Parakeet + Whisper")
         addToggle("power", NSColor.systemMint, "Start at Login", "Open Lowkey when you log in", draft.startAtLogin, #selector(toggleLogin))
         addStatus()
     }
@@ -267,9 +268,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         if let last = content.arrangedSubviews.last {
             content.setCustomSpacing(16, after: last)
         }
-        let text = engineReady
-            ? "Engine ready on \(draft.bindHost):\(draft.bindPort)"
-            : (engineError ?? "Engine is not running")
+        let text: String
+        if ParakeetEngine.shared.ready {
+            text = "Parakeet ready on the Neural Engine"
+        } else if engineReady {
+            text = "Whisper ready on \(draft.bindHost):\(draft.bindPort)"
+        } else {
+            text = engineError ?? "Engine is not running"
+        }
         let access = PasteService.isTrusted() ? "Accessibility is active." : "Accessibility still needs a grant."
         let field = NSTextField(wrappingLabelWithString: "\(text)  \(access)")
         field.font = NSFont.systemFont(ofSize: 11)

@@ -11,8 +11,10 @@ REPO="${LOWKEY_REPO:-https://github.com/nhwoodward/Lowkey.git}"
 SRC="${LOWKEY_DIR:-$HOME/src/Lowkey}"
 SUPPORT="${HOME}/Library/Application Support/Lowkey"
 LEGACY="${HOME}/Library/Application Support/Whisperly"
-MODEL="${SUPPORT}/models/ggml-small.bin"
-MODEL_URL="${LOWKEY_MODEL_URL:-https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin}"
+# Whisper is the fallback engine; Parakeet (the primary engine, on the
+# Neural Engine) downloads its own weights on first launch.
+MODEL="${SUPPORT}/models/ggml-small.en-q5_1.bin"
+MODEL_URL="${LOWKEY_MODEL_URL:-https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en-q5_1.bin}"
 MIN_MODEL_BYTES=100000000
 
 info() { print -r -- "==> $*"; }
@@ -32,7 +34,7 @@ if ! xcode-select -p >/dev/null 2>&1; then
 fi
 
 if ! command -v whisper-server >/dev/null 2>&1; then
-    info "Installing whisper-cpp (local Whisper engine)"
+    info "Installing whisper-cpp (local fallback engine)"
     brew install whisper-cpp
 fi
 
@@ -66,7 +68,7 @@ if [[ -f "${MODEL}" ]]; then
 fi
 
 if (( need_model )); then
-    info "Downloading ggml-small.bin (~466 MB). This happens once."
+    info "Downloading ggml-small.en-q5_1.bin (~181 MB) for the fallback engine. This happens once."
     tmp="$(mktemp "${TMPDIR:-/tmp}/lowkey-model.XXXXXX")"
     trap 'rm -f "${tmp}"' EXIT
     curl -fL --progress-bar -o "${tmp}" "${MODEL_URL}"
@@ -87,5 +89,6 @@ open "${HOME}/Applications/Lowkey.app"
 
 print -r -- ""
 print -r -- "Lowkey is installed."
+print -r -- "First launch downloads the Parakeet model (~500 MB, once); Whisper covers dictation until it lands."
 print -r -- "Hold Right Command, speak, release."
 print -r -- "Grant Microphone and Accessibility when macOS asks."
