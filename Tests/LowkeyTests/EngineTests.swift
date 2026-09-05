@@ -23,8 +23,10 @@ final class EngineTests: XCTestCase {
             def do_GET(self):
                 self.send_response(200)
                 self.end_headers()
-            def log_message(self, *args): pass
-        http.server.HTTPServer(('127.0.0.1', port), Handler).serve_forever()
+            def log_message(self, *args): print(args, flush=True)
+        server = http.server.HTTPServer(('127.0.0.1', port), Handler)
+        print('mock engine listening', server.server_address, flush=True)
+        server.serve_forever()
         """
         try source.write(to: server, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: server.path)

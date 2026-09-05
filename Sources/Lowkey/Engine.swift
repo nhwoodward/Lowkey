@@ -9,6 +9,7 @@ final class Engine {
     private var stopped = false
     private var ready = false
     private var errorMessage: String?
+    private var probeError: String?
 
     var isReady: Bool { stateLock.withLock { ready } }
     var lastError: String? { stateLock.withLock { errorMessage } }
@@ -83,7 +84,8 @@ final class Engine {
         do {
             try spawn(config: config)
             let ok = waitUntilReady(config: config, timeout: timeout, ticket: ticket)
-            updateState(ready: ok, error: ok ? nil : "Whisper did not become ready. Check its model and server path.", ticket: ticket)
+            let detail = probeError.map { " \($0)" } ?? " Check its model and server path."
+            updateState(ready: ok, error: ok ? nil : "Whisper did not become ready.\(detail)", ticket: ticket)
             if !ok { teardownLocked() }
             return ok && isCurrent(ticket)
         } catch {
@@ -172,21 +174,28 @@ final class Engine {
         request.timeoutInterval = 0.6
         let sem = DispatchSemaphore(value: 0)
         let result = ProbeResult()
-        URLSession.shared.dataTask(with: request) { _, response, _ in
+        let task = URLSession.shared.dataTask(with: request) { _, response, error in
             if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
                 result.setReady()
+            } else {
+                result.setError(error?.localizedDescription ?? "Health endpoint returned HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0).")
             }
             sem.signal()
-        }.resume()
-        _ = sem.wait(timeout: .now() + 0.8)
+        }
+        task.resume()
+        if sem.wait(timeout: .now() + 0.8) == .timedOut { task.cancel() }
+        probeError = result.error
         return result.ready
     }
 
     private final class ProbeResult {
         let lock = NSLock()
         private var value = false
+        private var message: String?
         var ready: Bool { lock.withLock { value } }
+        var error: String? { lock.withLock { message } }
         func setReady() { lock.withLock { value = true } }
+        func setError(_ error: String) { lock.withLock { message = error } }
     }
 
     private static func waitForExit(_ process: Process, timeout: TimeInterval) {
