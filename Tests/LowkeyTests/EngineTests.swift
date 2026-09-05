@@ -2,7 +2,13 @@ import XCTest
 @testable import Lowkey
 
 final class EngineTests: XCTestCase {
-    func testRetiredEngineCanRestartButShutdownCannot() throws {
+    func testRetiredEngineCanRestartButShutdownCannot() async throws {
+        // Match the app's background transcription queue and leave the main
+        // run loop available for Foundation process and network setup.
+        try await Task.detached { try Self.exerciseEngineLifecycle() }.value
+    }
+
+    private static func exerciseEngineLifecycle() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("lowkey-engine-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -30,7 +36,11 @@ final class EngineTests: XCTestCase {
         config.port = Int.random(in: 30000...55000)
         let engine = Engine()
         defer { engine.stop() }
-        XCTAssertTrue(engine.ensureReady(config: config, timeout: 8))
+        func diagnostics() -> String {
+            let log = (try? String(contentsOf: Config.logsDirectory.appendingPathComponent("engine.log"), encoding: .utf8)) ?? "No engine output"
+            return "\(engine.lastError ?? "No engine error"): \(log)"
+        }
+        XCTAssertTrue(engine.ensureReady(config: config, timeout: 8), diagnostics())
         XCTAssertTrue(engine.isReady)
         engine.retire()
         XCTAssertTrue(engine.ensureReady(config: config, timeout: 8), "Retirement must preserve fallback recovery")
