@@ -16,15 +16,17 @@ final class EngineTests: XCTestCase {
         defer { unsetenv("LOWKEY_SUPPORT_DIRECTORY") }
         let server = root.appendingPathComponent("server")
         let source = """
-        #!/usr/bin/env python3
-        import http.server, sys
+        #!/usr/bin/python3
+        import http.server, socketserver, sys
         port = int(sys.argv[sys.argv.index('--port') + 1])
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 self.send_response(200)
                 self.end_headers()
             def log_message(self, *args): print(args, flush=True)
-        server = http.server.HTTPServer(('127.0.0.1', port), Handler)
+        class Server(socketserver.TCPServer):
+            allow_reuse_address = True
+        server = Server(('127.0.0.1', port), Handler)
         print('mock engine listening', server.server_address, flush=True)
         server.serve_forever()
         """
