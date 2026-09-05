@@ -1,547 +1,394 @@
 import AppKit
 
 enum FlowBarMode: Equatable {
-    case hidden
-    case idle
-    case listening
-    case working
-    case success
+    case hidden, idle, listening, working, success
     case failed(String)
 }
 
+// A nonactivating panel keeps the insertion point in the app being dictated to.
+// AppKit owns the glass and controls; this controller owns only dictation state.
 final class FlowBarController {
     var onIdleTap: (() -> Void)?
-    // Where the bar settles after a run: .idle when the user keeps the widget
-    // visible, .hidden otherwise.
+    var onStop: (() -> Void)?
     var restingMode: FlowBarMode = .hidden
-
-    private var panel: NSPanel?
-    private let chrome = FlowBarChrome()
     private(set) var mode: FlowBarMode = .hidden
-    private var incoming: [CGFloat] = Array(repeating: 0, count: 18)
-    private var bars: [CGFloat] = Array(repeating: 0, count: 18)
+    private var panel: NSPanel?
+    private let chrome = FlowBarContent()
+    private var glass: NSView?
+    private var dismissWork: DispatchWorkItem?
     private var timer: Timer?
-    private var hideWork: DispatchWorkItem?
-    private var hugging = false
-    private var pendingSuccess = false
+    private var levels = Array(repeating: CGFloat.zero, count: 18)
+    private var incoming = Array(repeating: CGFloat.zero, count: 18)
+    private var screen: NSScreen?
+    private var generation = 0
+    private var reducedMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
 
-    func setMode(_ mode: FlowBarMode) {
-        hideWork?.cancel()
-        let previous = self.mode
-        self.mode = mode
-        if mode == .hidden {
-            cancelHug()
+    func setMode(_ next: FlowBarMode) {
+        generation += 1
+        dismissWork?.cancel()
+        dismissWork = nil
+        let previous = mode
+        mode = next
+        if next == .hidden {
+            chrome.apply(.hidden)
             stopTimer()
-            chrome.resetTransition()
             panel?.orderOut(nil)
             return
         }
         if panel == nil { build() }
-        panel?.ignoresMouseEvents = mode != .idle
-        panel?.alphaValue = 1
+        if previous == .hidden || next == .listening {
+            screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
+        }
+        chrome.apply(next, animated: previous != .hidden && !reducedMotion)
+        if next == .listening { startTimer() } else { stopTimer() }
+        panel?.ignoresMouseEvents = next == .working || next == .success
+        updateFrame(animated: previous != .hidden)
         panel?.orderFrontRegardless()
+        switch next {
+        case .success: rest(after: 1.0)
+        case .failed: rest(after: 6)
+        default: break
+        }
+    }
 
-        switch mode {
-        case .listening:
-            hugging = false
-            pendingSuccess = false
-            chrome.freezeLayout = false
-            startTimer()
-            chrome.apply(mode: mode, bars: bars)
-            place(size(for: mode), animated: false)
-        case .working:
-            stopTimer()
-            chrome.beginMorph()
-            hugIntoLoader()
-        case .success:
-            if hugging {
-                pendingSuccess = true
-            } else {
-                finishWithCheck()
+    private func updateFrame(animated: Bool) {
+        let visible = (screen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
+        chrome.fitMessageWidth(visible.width - 36)
+        let rect = Self.panelFrame(for: chrome.preferredSize, in: visible)
+        if reducedMotion || !animated {
+            panel?.setFrame(rect, display: true)
+        } else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.32
+                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1)
+                panel?.animator().setFrame(rect, display: true)
             }
-        case .idle:
-            cancelHug()
-            stopTimer()
-            chrome.resetTransition()
-            chrome.apply(mode: mode, bars: bars)
-            place(size(for: mode), animated: previous != .hidden && previous != .idle && previous != .working)
-        case .failed(let message):
-            cancelHug()
-            stopTimer()
-            chrome.showFailure(message)
-            place(size(for: mode), animated: false)
-            restSoon(after: 2.6)
-        case .hidden:
-            break
         }
     }
 
     func pushWave(_ samples: [CGFloat]) {
         guard mode == .listening, !samples.isEmpty else { return }
-        if samples.count == incoming.count {
-            incoming = samples.map { max(0, min(1, $0)) }
-        } else {
-            incoming = (0..<incoming.count).map { index in
-                let mapped = Int(round(Double(index) * Double(samples.count - 1) / Double(incoming.count - 1)))
-                return max(0, min(1, samples[mapped]))
-            }
+        incoming = (0..<18).map { index in
+            let mapped = min(samples.count - 1, index * samples.count / 18)
+            return max(0, min(1, samples[mapped]))
         }
     }
 
     func resetLevels() {
-        incoming = Array(repeating: 0, count: 18)
-        bars = Array(repeating: 0, count: 18)
-        chrome.resetTransition()
+        levels = Array(repeating: 0, count: 18)
+        incoming = levels
+        chrome.waveform.bars = levels
     }
 
-    // A quick swell of the working pill: feedback for a hotkey press that
-    // arrived while the previous dictation is still transcribing, which used
-    // to be swallowed silently.
     func nudge() {
-        guard let panel, mode == .working, !hugging else { return }
-        let resting = frame(for: size(for: mode))
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.12
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            panel.animator().setFrame(resting.insetBy(dx: -4, dy: -4), display: true)
-        } completionHandler: { [weak self] in
-            guard let self, let panel = self.panel else { return }
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.16
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                panel.animator().setFrame(self.frame(for: self.size(for: self.mode)), display: true)
-            }
-        }
+        guard mode == .working else { return }
+        chrome.showWorkingMessage("Finishing dictation…", animated: !reducedMotion)
+        updateFrame(animated: true)
+        NSAccessibility.post(element: chrome, notification: .announcementRequested,
+                             userInfo: [.announcement: "Finishing dictation", .priority: NSAccessibilityPriorityLevel.medium.rawValue])
     }
 
-    private func hugIntoLoader() {
-        guard let panel else { return }
-        hugging = true
-        pendingSuccess = false
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.24
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            panel.setFrame(frame(for: NSSize(width: 36, height: 36)), display: true, animate: true)
-        } completionHandler: { [weak self] in
-            guard let self else { return }
-            self.hugging = false
-            guard self.mode == .working || self.mode == .success || self.pendingSuccess else { return }
-            if self.pendingSuccess || self.mode == .success {
-                self.finishWithCheck()
-            }
-        }
-    }
-
-    private func cancelHug() {
-        hugging = false
-        pendingSuccess = false
-        if let panel {
-            panel.setFrame(panel.frame, display: false, animate: false)
-        }
-    }
-
-    private func finishWithCheck() {
-        pendingSuccess = false
-        chrome.completeCheck()
-        fadeOut(after: 0.68)
-    }
-
-    private func fadeOut(after delay: TimeInterval) {
+    private func rest(after delay: TimeInterval) {
+        let ticket = generation
         let work = DispatchWorkItem { [weak self] in
-            guard let self, let panel = self.panel else { return }
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.18
-                context.timingFunction = CAMediaTimingFunction(name: .easeIn)
-                panel.animator().alphaValue = 0
-            } completionHandler: {
-                if self.mode == .success {
-                    self.setMode(self.restingMode)
-                    panel.alphaValue = 1
-                    self.chrome.resetTransition()
-                }
-            }
-        }
-        hideWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
-    }
-
-    private func restSoon(after delay: TimeInterval) {
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
+            guard let self, self.generation == ticket else { return }
             self.setMode(self.restingMode)
         }
-        hideWork = work
+        dismissWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     private func startTimer() {
         guard timer == nil else { return }
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            self?.tick()
-        }
-        if let timer {
-            RunLoop.main.add(timer, forMode: .common)
-        }
-    }
-
-    private func stopTimer() {
-        timer?.invalidate()
-        timer = nil
-    }
-
-    private func tick() {
-        guard mode == .listening else { return }
-        for index in 0..<bars.count {
-            let target = incoming[index]
-            let rising = target > bars[index]
-            bars[index] += (target - bars[index]) * (rising ? 0.55 : 0.28)
-            if target < 0.05 {
-                bars[index] *= 0.82
+        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+            guard let self, self.mode == .listening else { return }
+            for i in self.levels.indices {
+                self.levels[i] += (self.incoming[i] - self.levels[i]) * (self.incoming[i] > self.levels[i] ? 0.65 : 0.3)
             }
+            self.chrome.waveform.bars = self.levels
         }
-        chrome.apply(mode: mode, bars: bars)
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
+
+    private func stopTimer() { timer?.invalidate(); timer = nil }
 
     private func build() {
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 118, height: 38),
-            styleMask: [.nonactivatingPanel, .fullSizeContentView, .borderless],
-            backing: .buffered,
-            defer: false
-        )
-        panel.level = .statusBar
+        let panel = NSPanel(contentRect: .zero, styleMask: [.nonactivatingPanel, .borderless], backing: .buffered, defer: false)
+        panel.level = .floating
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
-        panel.ignoresMouseEvents = true
-
-        chrome.frame = NSRect(x: 0, y: 0, width: 118, height: 38)
-        chrome.onIdleTap = { [weak self] in self?.onIdleTap?() }
-        panel.contentView = chrome
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.isReleasedWhenClosed = false
+        panel.setAccessibilityLabel("Lowkey dictation")
+        chrome.onStart = { [weak self] in self?.onIdleTap?() }
+        chrome.onStop = { [weak self] in self?.onStop?() }
+        // Leave enough transparent space for the system's optical edge.
+        let root = NSView()
+        let material: NSView
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.style = .regular
+            glass.cornerRadius = 24
+            glass.contentView = chrome
+            material = glass
+        } else {
+            material = legacyMaterial()
+        }
+        #else
+        material = legacyMaterial()
+        #endif
+        material.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(material)
+        NSLayoutConstraint.activate([
+            material.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 6),
+            material.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -6),
+            material.topAnchor.constraint(equalTo: root.topAnchor, constant: 6),
+            material.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -6),
+        ])
+        self.glass = material
+        panel.contentView = root
         self.panel = panel
     }
 
-    private func size(for mode: FlowBarMode) -> NSSize {
-        switch mode {
-        case .idle, .working, .success:
-            return NSSize(width: 36, height: 36)
-        case .failed(let message):
-            return NSSize(width: FlowBarChrome.failureWidth(for: message), height: 38)
-        default:
-            return NSSize(width: 118, height: 38)
-        }
+    private func legacyMaterial() -> NSView {
+        let effect = NSVisualEffectView()
+        effect.material = .popover
+        effect.blendingMode = .behindWindow
+        effect.state = .active
+        effect.wantsLayer = true
+        effect.layer?.cornerRadius = 24
+        effect.layer?.masksToBounds = true
+        chrome.translatesAutoresizingMaskIntoConstraints = false
+        effect.addSubview(chrome)
+        NSLayoutConstraint.activate([
+            chrome.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
+            chrome.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
+            chrome.topAnchor.constraint(equalTo: effect.topAnchor),
+            chrome.bottomAnchor.constraint(equalTo: effect.bottomAnchor),
+        ])
+        return effect
     }
 
-    private func frame(for size: NSSize) -> NSRect {
-        guard let screen = NSScreen.main else {
-            return NSRect(origin: .zero, size: size)
-        }
-        let visible = screen.visibleFrame
-        return NSRect(
-            x: visible.midX - size.width / 2,
-            y: visible.minY + 22,
-            width: size.width,
-            height: size.height
-        )
-    }
-
-    private func place(_ size: NSSize, animated: Bool) {
-        panel?.setFrame(frame(for: size), display: true, animate: animated)
+    static func panelFrame(for size: NSSize, in visible: NSRect) -> NSRect {
+        let width = min(size.width + 12, max(0, visible.width - 24))
+        return NSRect(x: visible.midX - width / 2, y: visible.minY + 18,
+                      width: width, height: FlowBarContent.height + 12)
     }
 }
 
-private final class FlowBarChrome: NSView {
-    var onIdleTap: (() -> Void)?
-    var freezeLayout = false
-
-    static let failureFont = NSFont.systemFont(ofSize: 12, weight: .medium)
-
-    private let idleIcon = NSImageView()
-    private let idleWell = NSView()
+final class FlowBarContent: NSView {
+    static let height: CGFloat = 48
+    private static let padding: CGFloat = 18
+    private static let indicatorSize: CGFloat = 16
+    private static let spacing: CGFloat = 8
+    private static let maximumWidth: CGFloat = 480
+    var onStart: (() -> Void)?
+    var onStop: (() -> Void)?
+    fileprivate let waveform = WaveformView()
+    let label = NSTextField(labelWithString: "")
+    private let start = NSButton()
+    private let recordingSurface = NSButton()
+    private let status = NSImageView()
     private let progress = ProgressGlyphView()
-    private let waveform = WaveformView()
-    private let failIcon = NSImageView()
-    private let failLabel = PassthroughLabel(labelWithString: "")
-    private let hover = HoverEngine()
-    private var idle = true
+    private var mode: FlowBarMode = .idle
 
-    static func failureWidth(for message: String) -> CGFloat {
-        let text = (message as NSString).size(withAttributes: [.font: failureFont]).width
-        return min(340, max(150, ceil(text) + 62))
+    var preferredSize: NSSize {
+        let width: CGFloat
+        switch mode {
+        case .hidden, .idle, .success: width = Self.height
+        case .listening: width = 152
+        case .working, .failed:
+            width = label.isHidden ? Self.height : 2 * Self.padding + Self.indicatorSize + Self.spacing + ceil(label.cell?.cellSize.width ?? 0)
+        }
+        return NSSize(width: width, height: Self.height)
     }
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        hover.onSync = { [weak self] in self?.applyIdleChrome() }
-        layer?.masksToBounds = true
-        layer?.backgroundColor = Theme.overlay.cgColor
-
-        idleWell.wantsLayer = true
-        idleIcon.image = Theme.symbol("mic.fill", size: 11)
-        idleIcon.contentTintColor = Theme.flowAccent.withAlphaComponent(0.92)
-        idleIcon.imageScaling = .scaleNone
-        idleWell.addSubview(idleIcon)
-
-        failIcon.image = Theme.symbol("exclamationmark.triangle.fill", size: 11)
-        failIcon.contentTintColor = Theme.flowWarn
-        failIcon.imageScaling = .scaleNone
-        failIcon.isHidden = true
-        failLabel.font = Self.failureFont
-        failLabel.textColor = Theme.flowAccent.withAlphaComponent(0.92)
-        failLabel.lineBreakMode = .byTruncatingTail
-        failLabel.isHidden = true
-
-        addSubview(idleWell)
-        addSubview(waveform)
-        addSubview(progress)
-        addSubview(failIcon)
-        addSubview(failLabel)
-        toolTip = "Start dictation"
-        setAccessibilityRole(.button)
-        setAccessibilityLabel("Start dictation")
-
-        progress.alphaValue = 0
-        waveform.wantsLayer = true
-        progress.wantsLayer = true
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        start.image = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Start dictation")
+        start.imagePosition = .imageOnly
+        start.bezelStyle = .circular
+        start.isBordered = false
+        start.target = self
+        start.action = #selector(startAction)
+        start.toolTip = "Start dictation"
+        start.setAccessibilityLabel("Start dictation")
+        addSubview(start)
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.textColor = .labelColor
+        label.maximumNumberOfLines = 1
+        label.cell?.wraps = false
+        label.cell?.usesSingleLineMode = true
+        label.lineBreakMode = .byClipping
+        for view in [waveform, label, status, progress] {
+            view.wantsLayer = true
+            addSubview(view)
+        }
+        // The waveform capsule is one click target, without extra visible controls.
+        recordingSurface.title = ""
+        recordingSurface.isBordered = false
+        recordingSurface.target = self
+        recordingSurface.action = #selector(stopAction)
+        recordingSurface.toolTip = "Click to finish dictation. Press Escape to cancel."
+        recordingSurface.setAccessibilityLabel("Finish dictation")
+        recordingSurface.setAccessibilityHelp("Click the voice bar to finish. Press Escape to cancel.")
+        addSubview(recordingSurface)
+        setAccessibilityRole(.group)
     }
 
     required init?(coder: NSCoder) { nil }
+    @objc private func startAction() { onStart?() }
+    @objc private func stopAction() { onStop?() }
 
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        hover.install(on: self)
+    func apply(_ mode: FlowBarMode, animated: Bool = false) {
+        let previous = self.mode
+        self.mode = mode
+        for view in subviews {
+            view.layer?.removeAllAnimations()
+            view.alphaValue = 1
+            view.isHidden = true
+        }
+        if mode != .success { progress.reset() }
+        toolTip = nil
+        setAccessibilityHelp(nil)
+        switch mode {
+        case .idle, .hidden:
+            start.isHidden = false
+            setAccessibilityLabel("Start dictation")
+        case .listening:
+            waveform.isHidden = false
+            recordingSurface.isHidden = false
+            setAccessibilityLabel("Listening")
+            if animated { fadeIn(waveform) }
+        case .working:
+            progress.isHidden = false
+            progress.beginSpinning(animated: !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+            setAccessibilityLabel("Transcribing")
+            if animated {
+                if previous == .listening {
+                    waveform.isHidden = false
+                    waveform.alphaValue = 0
+                    let dissolve = CABasicAnimation(keyPath: "opacity")
+                    dissolve.fromValue = 1
+                    dissolve.toValue = 0
+                    dissolve.duration = 0.22
+                    waveform.layer?.add(dissolve, forKey: "dissolve")
+                }
+                fadeIn(progress, delay: 0.08)
+            }
+        case .success:
+            progress.isHidden = false
+            progress.completeIntoCheck(animated: animated)
+            setAccessibilityLabel("Dictation complete")
+        case .failed(let message):
+            status.image = NSImage(systemSymbolName: "exclamationmark.circle.fill", accessibilityDescription: nil)
+            status.contentTintColor = .systemOrange
+            status.isHidden = false
+            showMessage(message)
+            if animated {
+                fadeIn(status, delay: 0.24)
+                fadeIn(label, delay: 0.32)
+            }
+        }
+        needsLayout = true
     }
 
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        applyIdleChrome()
-        waveform.needsDisplay = true
+    func showWorkingMessage(_ message: String, animated: Bool = false) {
+        guard mode == .working else { return }
+        showMessage(message)
+        if animated { fadeIn(label, delay: 0.32) }
     }
 
-    override func mouseEntered(with event: NSEvent) {
-        guard idle else { return }
-        hover.enter()
-        applyIdleChrome()
+    private func showMessage(_ message: String) {
+        let singleLine = message.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        label.stringValue = singleLine.isEmpty ? "Something went wrong" : singleLine
+        let fullMessage = label.stringValue
+        // Technical diagnostics belong in the tooltip, not a screen-wide capsule.
+        label.isHidden = false
+        label.toolTip = fullMessage
+        toolTip = fullMessage
+        setAccessibilityLabel(label.stringValue)
+        setAccessibilityHelp(fullMessage)
+        fitMessageWidth(Self.maximumWidth)
+        needsLayout = true
     }
 
-    override func mouseExited(with event: NSEvent) {
-        hover.exit()
-        applyIdleChrome()
+    func fitMessageWidth(_ maximumWidth: CGFloat) {
+        guard !label.isHidden, preferredSize.width > maximumWidth else { return }
+        let message = label.toolTip ?? label.stringValue
+        if message.contains("multilingual Whisper model") {
+            label.stringValue = "Choose a multilingual model in Settings"
+        } else if message.hasPrefix("Whisper model not found") {
+            label.stringValue = "Whisper model not found"
+        } else if message.hasPrefix("whisper-server not found") {
+            label.stringValue = "Whisper is not installed"
+        } else {
+            label.stringValue = "Dictation couldn't finish"
+        }
+        setAccessibilityLabel(label.stringValue)
+        needsLayout = true
     }
 
-    override func mouseDown(with event: NSEvent) {
-        guard idle else { return }
-        hover.beginPress()
-        applyIdleChrome()
-        onIdleTap?()
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        hover.endPress(inside: true)
-        applyIdleChrome()
-    }
-
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { idle }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        guard idle, bounds.contains(point) else { return super.hitTest(point) }
-        return self
+    private func fadeIn(_ view: NSView, delay: TimeInterval = 0) {
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0
+        fade.toValue = 1
+        fade.duration = 0.18
+        fade.beginTime = CACurrentMediaTime() + delay
+        fade.fillMode = .backwards
+        view.layer?.add(fade, forKey: "appear")
     }
 
     override func layout() {
         super.layout()
-        layer?.cornerRadius = bounds.height / 2
-        idleWell.frame = bounds.insetBy(dx: 6, dy: 6)
-        idleWell.layer?.cornerRadius = min(idleWell.bounds.width, idleWell.bounds.height) / 2
-        idleIcon.frame = idleWell.bounds
-        positionGlyphs()
-        if !freezeLayout {
-            waveform.frame = bounds.insetBy(dx: 11, dy: 8)
-        }
-        failIcon.frame = NSRect(x: 13, y: ((bounds.height - 14) / 2).rounded(), width: 16, height: 14)
-        let labelX = failIcon.frame.maxX + 7
-        let labelHeight = ceil(failLabel.intrinsicContentSize.height)
-        failLabel.frame = NSRect(
-            x: labelX,
-            y: ((bounds.height - labelHeight) / 2).rounded(),
-            width: max(0, bounds.width - labelX - 14),
-            height: labelHeight
-        )
-        applyIdleChrome()
-    }
-
-    private func positionGlyphs() {
-        let size: CGFloat = 18
-        progress.frame = NSRect(
-            x: ((bounds.width - size) / 2).rounded(),
-            y: ((bounds.height - size) / 2).rounded(),
-            width: size,
-            height: size
-        )
-    }
-
-    func apply(mode: FlowBarMode, bars: [CGFloat]) {
-        waveform.bars = bars
-        switch mode {
-        case .hidden, .working, .success, .failed:
-            break
-        case .idle:
-            idle = true
-            waveform.alphaValue = 0
-            progress.alphaValue = 0
-            hideFailure()
-            idleWell.isHidden = false
-            idleWell.alphaValue = 1
-            applyIdleChrome()
-        case .listening:
-            idle = false
-            hover.reset()
-            hideFailure()
-            idleWell.isHidden = true
-            waveform.isHidden = false
-            waveform.alphaValue = 1
-            progress.alphaValue = 0
-            waveform.needsDisplay = true
-            applyIdleChrome()
-        }
-        needsLayout = true
-    }
-
-    // The wave dissolves into the spinning ring while the pill contracts
-    // around it: one continuous gesture instead of a hard swap.
-    func beginMorph() {
-        freezeLayout = true
-        idle = false
-        hover.reset()
-        hideFailure()
-        idleWell.isHidden = true
-        idleWell.alphaValue = 0
-        positionGlyphs()
-        progress.beginSpinning()
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.16
-            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
-            waveform.animator().alphaValue = 0
-        }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.22
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            progress.animator().alphaValue = 1
-        }
-        applyIdleChrome()
-        needsLayout = true
-        layoutSubtreeIfNeeded()
-    }
-
-    func completeCheck() {
-        progress.completeIntoCheck()
-    }
-
-    func showFailure(_ message: String) {
-        freezeLayout = false
-        idle = false
-        hover.reset()
-        idleWell.isHidden = true
-        idleWell.alphaValue = 0
-        waveform.alphaValue = 0
-        progress.alphaValue = 0
-        progress.reset()
-        failLabel.stringValue = message
-        failIcon.isHidden = false
-        failLabel.isHidden = false
-        applyIdleChrome()
-        needsLayout = true
-        layoutSubtreeIfNeeded()
-    }
-
-    private func hideFailure() {
-        failIcon.isHidden = true
-        failLabel.isHidden = true
-    }
-
-    func resetTransition() {
-        freezeLayout = false
-        hideFailure()
-        waveform.isHidden = false
-        waveform.alphaValue = 1
-        progress.alphaValue = 0
-        progress.reset()
-        needsLayout = true
-        layoutSubtreeIfNeeded()
-    }
-
-    private func applyIdleChrome() {
-        let fill: NSColor
-        let well: CGFloat
-        if !idle {
-            fill = Theme.overlay
-            well = 0.09
-        } else if hover.pressed, hover.hovered {
-            fill = Theme.overlayPress
-            well = 0.22
-        } else if hover.hovered {
-            fill = Theme.overlayHover
-            well = 0.16
-        } else {
-            fill = Theme.overlay
-            well = 0.09
-        }
-        CATransaction.begin()
-        CATransaction.setAnimationDuration(Theme.chromeDuration)
-        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeInEaseOut))
-        layer?.backgroundColor = Theme.cg(fill, in: self)
-        idleWell.layer?.backgroundColor = Theme.cg(Theme.flowAccent.withAlphaComponent(well), in: self)
-        idleIcon.contentTintColor = idle && hover.hovered
-            ? Theme.flowAccent
-            : Theme.flowAccent.withAlphaComponent(0.92)
-        CATransaction.commit()
-        toolTip = idle ? "Start dictation" : nil
+        start.frame = NSRect(x: (bounds.width - 36) / 2, y: (bounds.height - 36) / 2, width: 36, height: 36)
+        recordingSurface.frame = bounds
+        waveform.frame = NSRect(x: 18, y: 12, width: max(0, bounds.width - 36), height: bounds.height - 24)
+        let indicatorFrame = NSRect(x: Self.padding, y: (bounds.height - Self.indicatorSize) / 2,
+                                    width: Self.indicatorSize, height: Self.indicatorSize)
+        progress.frame = label.isHidden
+            ? NSRect(x: (bounds.width - 20) / 2, y: (bounds.height - 20) / 2, width: 20, height: 20)
+            : indicatorFrame
+        status.frame = indicatorFrame
+        let labelX = indicatorFrame.maxX + Self.spacing
+        let height = min(bounds.height, ceil(label.intrinsicContentSize.height))
+        label.frame = NSRect(x: labelX, y: (bounds.height - height) / 2,
+                             width: max(0, bounds.width - labelX - Self.padding), height: height)
     }
 }
 
 private final class WaveformView: NSView {
-    var bars: [CGFloat] = []
-
+    var bars: [CGFloat] = [] { didSet { needsDisplay = true } }
     override func draw(_ dirtyRect: NSRect) {
         guard !bars.isEmpty else { return }
-        let count = bars.count
-        let gap: CGFloat = 2.0
-        let barW = max(1.8, (bounds.width - gap * CGFloat(count - 1)) / CGFloat(count))
-        var x: CGFloat = 0
-        for raw in bars {
-            let h = max(3, bounds.height * raw)
-            let y = (bounds.height - h) / 2
-            // Louder bars warm up toward the accent; quiet ones stay pale.
-            let heat = max(0, min(1, (raw - 0.18) / 0.6))
-            let color = Theme.flowWave.blended(withFraction: heat, of: Theme.flowAccent) ?? Theme.flowWave
-            color.setFill()
-            let path = NSBezierPath(
-                roundedRect: NSRect(x: x.rounded(), y: y, width: barW, height: h),
-                xRadius: barW / 2,
-                yRadius: barW / 2
-            )
-            path.fill()
-            x += barW + gap
+        NSColor.labelColor.setFill()
+        let step = bounds.width / CGFloat(bars.count)
+        let width = max(1, step - 2.5)
+        for (index, value) in bars.enumerated() {
+            let height = max(3, bounds.height * value)
+            NSBezierPath(roundedRect: NSRect(x: CGFloat(index) * step, y: (bounds.height - height) / 2, width: width, height: height), xRadius: width / 2, yRadius: width / 2).fill()
         }
     }
 }
 
 // A ring that spins while whisper works, closes into a full circle, then
 // strokes a checkmark: the tail end of the wave-to-done morph.
-private final class ProgressGlyphView: NSView {
+final class ProgressGlyphView: NSView {
     private let ring = CAShapeLayer()
     private let check = CAShapeLayer()
-    private var spinning = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        setAccessibilityElement(true)
         for shape in [ring, check] {
+            shape.actions = ["strokeEnd": NSNull(), "strokeColor": NSNull(), "transform": NSNull()]
             shape.fillColor = nil
-            shape.strokeColor = Theme.flowAccent.cgColor
+            shape.strokeColor = NSColor.labelColor.cgColor
             shape.lineCap = .round
             shape.strokeStart = 0
             shape.strokeEnd = 0
@@ -561,7 +408,8 @@ private final class ProgressGlyphView: NSView {
     }
 
     private func applyColors() {
-        let stroke = Theme.cg(Theme.flowAccent, in: self)
+        var stroke = NSColor.labelColor.cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance { stroke = NSColor.labelColor.cgColor }
         ring.strokeColor = stroke
         check.strokeColor = stroke
     }
@@ -584,8 +432,9 @@ private final class ProgressGlyphView: NSView {
         CATransaction.commit()
     }
 
-    func beginSpinning() {
-        spinning = true
+    func beginSpinning(animated: Bool) {
+        setAccessibilityRole(.progressIndicator)
+        setAccessibilityLabel("Transcribing")
         check.removeAllAnimations()
         ring.removeAllAnimations()
         CATransaction.begin()
@@ -600,27 +449,29 @@ private final class ProgressGlyphView: NSView {
         grow.duration = 0.3
         grow.timingFunction = CAMediaTimingFunction(name: .easeOut)
         ring.strokeEnd = 0.72
-        ring.add(grow, forKey: "grow")
+        if animated { ring.add(grow, forKey: "grow") }
 
         let spin = CABasicAnimation(keyPath: "transform.rotation.z")
         spin.fromValue = 0
         spin.toValue = -Double.pi * 2
         spin.duration = 0.7
         spin.repeatCount = .infinity
-        ring.add(spin, forKey: "spin")
+        if animated { ring.add(spin, forKey: "spin") }
     }
 
-    func completeIntoCheck() {
+    func completeIntoCheck(animated: Bool) {
+        setAccessibilityRole(.image)
+        setAccessibilityLabel("Dictation complete")
         // Freeze the spin exactly where it is so the ring closes from its
         // current gap with no visual jump.
         let angle = (ring.presentation()?.value(forKeyPath: "transform.rotation.z") as? Double) ?? 0
         let partial = ring.presentation()?.strokeEnd ?? ring.strokeEnd
-        ring.removeAnimation(forKey: "spin")
+        ring.removeAllAnimations()
+        check.removeAllAnimations()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         ring.setValue(angle, forKeyPath: "transform.rotation.z")
         CATransaction.commit()
-        spinning = false
 
         let close = CABasicAnimation(keyPath: "strokeEnd")
         close.fromValue = partial
@@ -628,7 +479,7 @@ private final class ProgressGlyphView: NSView {
         close.duration = 0.2
         close.timingFunction = CAMediaTimingFunction(name: .easeOut)
         ring.strokeEnd = 1
-        ring.add(close, forKey: "close")
+        if animated { ring.add(close, forKey: "close") }
 
         let draw = CABasicAnimation(keyPath: "strokeEnd")
         draw.fromValue = 0
@@ -638,11 +489,10 @@ private final class ProgressGlyphView: NSView {
         draw.timingFunction = CAMediaTimingFunction(name: .easeOut)
         draw.fillMode = .backwards
         check.strokeEnd = 1
-        check.add(draw, forKey: "draw")
+        if animated { check.add(draw, forKey: "draw") }
     }
 
     func reset() {
-        spinning = false
         ring.removeAllAnimations()
         check.removeAllAnimations()
         CATransaction.begin()

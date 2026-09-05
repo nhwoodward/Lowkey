@@ -13,38 +13,47 @@ enum ParakeetError: LocalizedError {
     }
 }
 
-// Parakeet TDT 0.6b (int8) on the Apple Neural Engine via FluidAudio.
-// In-process CoreML: no server, no HTTP, and no GPU involvement, so it is
-// unaffected by the GPU contention and thermal throttling that degrade
-// whisper on this machine. Weights download once from Hugging Face and
-// stay cached; the ANE-compiled model stays resident after load.
+// English-only Parakeet TDT v2 through FluidAudio and in-process CoreML. Weights download
+// once and stay cached. Readiness is published only after model warmup.
 final class ParakeetEngine {
     static let shared = ParakeetEngine()
+    static let modelVersion: AsrModelVersion = .v2
     private let stateQueue = DispatchQueue(label: "app.lowkey.parakeet")
     private var manager: AsrManager?
-    private(set) var lastError: String?
+    private var errorMessage: String?
+    var lastError: String? { stateQueue.sync { errorMessage } }
+    private var loading = false
+    private var callbacks: [(Bool) -> Void] = []
 
     var ready: Bool {
         stateQueue.sync { manager != nil }
     }
 
     func start(completion: @escaping (Bool) -> Void) {
-        if ready {
-            DispatchQueue.main.async { completion(true) }
-            return
+        let shouldStart = stateQueue.sync { () -> Bool in
+            if manager != nil {
+                DispatchQueue.main.async { completion(true) }
+                return false
+            }
+            callbacks.append(completion)
+            guard !loading else { return false }
+            loading = true
+            errorMessage = nil
+            return true
         }
+        guard shouldStart else { return }
         #if arch(x86_64)
         // Intel Macs have no Neural Engine; a 0.6b CoreML model on CPU
         // would be slower than whisper. Decline so whisper stays primary.
-        stateQueue.sync { lastError = "Parakeet needs Apple Silicon" }
+        stateQueue.sync { errorMessage = "Parakeet needs Apple Silicon" }
         AppLog.line("parakeet skipped: no Neural Engine on Intel")
-        DispatchQueue.main.async { completion(false) }
+        finishLoading(false)
         return
         #endif
         Task.detached(priority: .userInitiated) {
             do {
                 let started = Date()
-                let models = try await AsrModels.downloadAndLoad(version: .v3)
+                let models = try await AsrModels.downloadAndLoad(version: Self.modelVersion)
                 let manager = AsrManager(config: .default)
                 try await manager.loadModels(models)
                 // One tiny inference finishes ANE warmup before real audio.
@@ -53,14 +62,24 @@ final class ParakeetEngine {
                     [Float](repeating: 0, count: 3200), decoderState: &state)
                 self.stateQueue.sync { self.manager = manager }
                 AppLog.line(String(
-                    format: "parakeet ready init=%.1fs", Date().timeIntervalSince(started)))
-                DispatchQueue.main.async { completion(true) }
+                    format: "parakeet ready model=%@ init=%.1fs", String(describing: Self.modelVersion), Date().timeIntervalSince(started)))
+                self.finishLoading(true)
             } catch {
-                self.stateQueue.sync { self.lastError = error.localizedDescription }
+                self.stateQueue.sync { self.errorMessage = error.localizedDescription }
                 AppLog.line("parakeet init failed: \(error.localizedDescription)")
-                DispatchQueue.main.async { completion(false) }
+                self.finishLoading(false)
             }
         }
+    }
+
+    private func finishLoading(_ success: Bool) {
+        let pending = stateQueue.sync { () -> [(Bool) -> Void] in
+            loading = false
+            let pending = callbacks
+            callbacks = []
+            return pending
+        }
+        DispatchQueue.main.async { pending.forEach { $0(success) } }
     }
 
     // Blocking bridge for the synchronous transcription path. Call from a
@@ -72,7 +91,7 @@ final class ParakeetEngine {
         }
         let box = ResultBox()
         let sem = DispatchSemaphore(value: 0)
-        Task.detached(priority: .userInitiated) {
+        let task = Task.detached(priority: .userInitiated) {
             do {
                 var state = TdtDecoderState.make()
                 let result = try await manager.transcribe(fileURL, decoderState: &state)
@@ -83,6 +102,8 @@ final class ParakeetEngine {
             sem.signal()
         }
         guard sem.wait(timeout: .now() + 60) == .success else {
+            task.cancel()
+            stateQueue.sync { self.manager = nil; self.errorMessage = "Parakeet timed out; using Whisper" }
             throw ParakeetError.timeout
         }
         return try box.get()
@@ -115,7 +136,7 @@ enum ParakeetTestHarness {
         Task.detached {
             do {
                 let t0 = Date()
-                let models = try await AsrModels.downloadAndLoad(version: .v3)
+                let models = try await AsrModels.downloadAndLoad(version: ParakeetEngine.modelVersion)
                 let manager = AsrManager(config: .default)
                 try await manager.loadModels(models)
                 var warm = TdtDecoderState.make()

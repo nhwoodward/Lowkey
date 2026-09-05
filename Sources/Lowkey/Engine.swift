@@ -4,77 +4,96 @@ import Foundation
 final class Engine {
     private var process: Process?
     private let queue = DispatchQueue(label: "app.lowkey.engine")
-    private var stopRequested = false
-    private(set) var isReady = false
-    private(set) var lastError: String?
+    private let stateLock = NSLock()
+    private var generation = 0
+    private var stopped = false
+    private var ready = false
+    private var errorMessage: String?
 
-    var isRunning: Bool { process?.isRunning == true }
+    var isReady: Bool { stateLock.withLock { ready } }
+    var lastError: String? { stateLock.withLock { errorMessage } }
+    var isRunning: Bool { queue.sync { process?.isRunning == true } }
 
     func start(config: Config, completion: @escaping (Bool) -> Void) {
+        let ticket = stateLock.withLock { () -> Int in
+            generation += 1
+            stopped = false
+            ready = false
+            errorMessage = nil
+            return generation
+        }
         queue.async {
-            self.stopRequested = false
-            if self.isReady, self.isRunning {
-                DispatchQueue.main.async { completion(true) }
-                return
-            }
-            // Never adopt an orphan on our port. A leftover whisper-server
-            // keeps previous transcripts as decoder context and gets slower
-            // with every dictation. Kill it and own the next process.
+            guard self.isCurrent(ticket) else { return }
             self.teardownLocked()
-            Self.terminatePortOccupant(port: config.bindPort)
-            do {
-                try self.spawn(config: config)
-            } catch {
-                self.lastError = error.localizedDescription
-                DispatchQueue.main.async { completion(false) }
-                return
+            let ok = self.launch(config: config, timeout: 90, ticket: ticket)
+            DispatchQueue.main.async {
+                guard self.isCurrent(ticket) else { return }
+                completion(ok)
             }
-            let ok = self.waitUntilReady(config: config, timeout: 90)
-            self.isReady = ok
-            if !ok {
-                self.lastError = self.lastError ?? "Whisper engine did not become ready."
-            }
-            DispatchQueue.main.async { completion(ok) }
+        }
+    }
+
+    // Release the fallback's model while Parakeet is healthy. Unlike shutdown,
+    // retirement must allow the next failed inference to restart Whisper.
+    func retire() {
+        let ticket = stateLock.withLock { generation }
+        queue.async {
+            guard self.isCurrent(ticket) else { return }
+            self.teardownLocked()
         }
     }
 
     func stop() {
-        stopRequested = true
-        queue.sync {
-            self.teardownLocked()
+        stateLock.withLock {
+            generation += 1
+            stopped = true
+            ready = false
+        }
+        queue.sync { self.teardownLocked() }
+    }
+
+    // Call only from the serialized background transcription queue.
+    func ensureReady(config: Config, timeout: TimeInterval) -> Bool {
+        let ticket = stateLock.withLock { generation }
+        return queue.sync {
+            guard isCurrent(ticket) else { return false }
+            if process?.isRunning == true, probe(config: config) {
+                updateState(ready: true, error: nil, ticket: ticket)
+                return true
+            }
+            teardownLocked()
+            return launch(config: config, timeout: timeout, ticket: ticket)
         }
     }
 
-    // Blocking recovery used by the transcription retry path. Call from a
-    // background thread only.
-    func ensureReady(config: Config, timeout: TimeInterval) -> Bool {
-        queue.sync {
-            if self.stopRequested { return false }
-            if self.probe(config: config), self.isRunning {
-                self.isReady = true
-                return true
-            }
-            self.teardownLocked()
-            Self.terminatePortOccupant(port: config.bindPort)
-            if self.stopRequested { return false }
-            do {
-                try self.spawn(config: config)
-            } catch {
-                self.lastError = error.localizedDescription
-                self.isReady = false
-                return false
-            }
-            let ok = self.waitUntilReady(config: config, timeout: timeout)
-            self.isReady = ok
-            if !ok {
-                self.lastError = self.lastError ?? "Whisper engine did not become ready."
-            }
-            return ok
+    private func isCurrent(_ ticket: Int) -> Bool {
+        stateLock.withLock { !stopped && generation == ticket }
+    }
+
+    private func updateState(ready: Bool, error: String?, ticket: Int) {
+        stateLock.withLock {
+            guard !stopped, generation == ticket else { return }
+            self.ready = ready
+            errorMessage = error
+        }
+    }
+
+    private func launch(config: Config, timeout: TimeInterval, ticket: Int) -> Bool {
+        guard isCurrent(ticket) else { return false }
+        do {
+            try spawn(config: config)
+            let ok = waitUntilReady(config: config, timeout: timeout, ticket: ticket)
+            updateState(ready: ok, error: ok ? nil : "Whisper did not become ready. Check its model and server path.", ticket: ticket)
+            if !ok { teardownLocked() }
+            return ok && isCurrent(ticket)
+        } catch {
+            updateState(ready: false, error: error.localizedDescription, ticket: ticket)
+            return false
         }
     }
 
     private func teardownLocked() {
-        if let process {
+        if let process, process.isRunning {
             process.terminate()
             Self.waitForExit(process, timeout: 1.5)
             if process.isRunning {
@@ -83,10 +102,13 @@ final class Engine {
             }
         }
         process = nil
-        isReady = false
+        stateLock.withLock { ready = false }
     }
 
     private func spawn(config: Config) throws {
+        if config.language != "en", (config.modelPath as NSString).lastPathComponent.contains(".en") {
+            throw EngineError.englishOnlyModel
+        }
         guard FileManager.default.isExecutableFile(atPath: config.whisperServerPath) else {
             throw EngineError.missingBinary(config.whisperServerPath)
         }
@@ -118,9 +140,10 @@ final class Engine {
         ]
         process.standardOutput = log
         process.standardError = log
-        process.terminationHandler = { [weak self] _ in
+        process.terminationHandler = { [weak self] ended in
             self?.queue.async {
-                self?.isReady = false
+                guard let self, self.process === ended else { return }
+                self.stateLock.withLock { self.ready = false }
             }
         }
         try process.run()
@@ -129,12 +152,11 @@ final class Engine {
         AppLog.line("engine spawned pid=\(process.processIdentifier) threads=\(config.effectiveThreads) max_context=0")
     }
 
-    private func waitUntilReady(config: Config, timeout: TimeInterval) -> Bool {
+    private func waitUntilReady(config: Config, timeout: TimeInterval, ticket: Int) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if stopRequested { return false }
+            if !isCurrent(ticket) { return false }
             if process?.isRunning == false {
-                lastError = "Whisper engine exited while starting. See engine.log."
                 return false
             }
             if probe(config: config) {
@@ -149,57 +171,22 @@ final class Engine {
         var request = URLRequest(url: config.baseURL)
         request.timeoutInterval = 0.6
         let sem = DispatchSemaphore(value: 0)
-        var ok = false
+        let result = ProbeResult()
         URLSession.shared.dataTask(with: request) { _, response, _ in
-            if let http = response as? HTTPURLResponse, (200..<500).contains(http.statusCode) {
-                ok = true
+            if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
+                result.setReady()
             }
             sem.signal()
         }.resume()
         _ = sem.wait(timeout: .now() + 0.8)
-        return ok
+        return result.ready
     }
 
-    private static func terminatePortOccupant(port: Int) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        task.arguments = ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-t"]
-        let stdout = Pipe()
-        task.standardOutput = stdout
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-        } catch {
-            return
-        }
-        waitForExit(task, timeout: 1.0)
-        if task.isRunning { task.terminate() }
-        let data = stdout.fileHandleForReading.readDataToEndOfFile()
-        let pids = String(data: data, encoding: .utf8)?
-            .split(whereSeparator: \.isNewline)
-            .compactMap { Int32($0) } ?? []
-        let selfPID = getpid()
-        let victims = pids.filter { pid in
-            pid != selfPID && Self.isWhisperServer(pid)
-        }
-        for pid in victims {
-            AppLog.line("engine replacing occupant pid=\(pid) port=\(port)")
-            kill(pid, SIGTERM)
-        }
-        if !victims.isEmpty {
-            Thread.sleep(forTimeInterval: 0.15)
-            for pid in victims {
-                kill(pid, SIGKILL)
-            }
-        }
-    }
-
-    private static func isWhisperServer(_ pid: Int32) -> Bool {
-        var buffer = [CChar](repeating: 0, count: 4096)
-        let written = proc_pidpath(pid, &buffer, UInt32(buffer.count))
-        guard written > 0 else { return false }
-        let path = String(cString: buffer)
-        return path.contains("whisper-server")
+    private final class ProbeResult {
+        let lock = NSLock()
+        private var value = false
+        var ready: Bool { lock.withLock { value } }
+        func setReady() { lock.withLock { value = true } }
     }
 
     private static func waitForExit(_ process: Process, timeout: TimeInterval) {
@@ -212,11 +199,14 @@ final class Engine {
 }
 
 enum EngineError: LocalizedError {
+    case englishOnlyModel
     case missingBinary(String)
     case missingModel(String)
 
     var errorDescription: String? {
         switch self {
+        case .englishOnlyModel:
+            return "Choose a multilingual Whisper model in Dictation settings for this language."
         case .missingBinary(let path):
             return "whisper-server not found at \(path)"
         case .missingModel(let path):
@@ -237,10 +227,10 @@ enum AppLog {
     }
 
     static func write(to file: URL, _ message: String) {
-        let text = "\(stamp.string(from: Date())) \(message)\n"
-        guard let data = text.data(using: .utf8) else { return }
         lock.lock()
         defer { lock.unlock() }
+        let text = "\(stamp.string(from: Date())) \(message)\n"
+        guard let data = text.data(using: .utf8) else { return }
         rotateIfNeeded(file)
         if FileManager.default.fileExists(atPath: file.path),
            let handle = try? FileHandle(forWritingTo: file) {

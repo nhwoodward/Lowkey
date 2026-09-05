@@ -49,8 +49,7 @@ enum ClipboardBehavior: String, Codable, CaseIterable {
 }
 
 enum TranscriptionEngineKind: String, Codable, CaseIterable {
-    // Parakeet TDT on the Neural Engine: fastest, immune to GPU contention
-    // and thermal throttling. Whisper (whisper-server on GPU) remains as
+    // Parakeet is the primary English engine on Apple silicon. Whisper is
     // the fallback and the choice for non-English dictation.
     case parakeet
     case whisper
@@ -75,7 +74,7 @@ enum PunctuationMode: String, Codable, CaseIterable {
     }
 }
 
-struct Config: Codable {
+struct Config: Codable, Equatable {
     var engine: TranscriptionEngineKind
     var modelPath: String
     var whisperServerPath: String
@@ -116,6 +115,16 @@ struct Config: Codable {
     static let loopbackHost = "127.0.0.1"
 
     static var supportDirectory: URL {
+        #if DEBUG
+        // Development builds can run beside the installed app without sharing
+        // preferences, recordings, history, or logs.
+        if let path = ProcessInfo.processInfo.environment["LOWKEY_SUPPORT_DIRECTORY"], !path.isEmpty {
+            let url = URL(fileURLWithPath: path, isDirectory: true)
+            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+            return url
+        }
+        #endif
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let url = root.appendingPathComponent("Lowkey", isDirectory: true)
         let legacy = root.appendingPathComponent("Whisperly", isDirectory: true)
@@ -303,8 +312,25 @@ struct Config: Codable {
         appearance = try c.decodeIfPresent(AppAppearance.self, forKey: .appearance) ?? fallback.appearance
     }
 
+    // English uses an English-only vocabulary. Automatic language detection
+    // belongs to the multilingual Whisper path, not the English recognizer.
+    var prefersParakeet: Bool { engine == .parakeet && language == "en" }
+
+    var whisperConfig: Config {
+        var next = self
+        next.engine = .whisper
+        if language != "en", (modelPath as NSString).lastPathComponent.contains(".en") {
+            let directory = URL(fileURLWithPath: modelPath).deletingLastPathComponent()
+            for name in ["ggml-small-q5_1.bin", "ggml-small.bin", "ggml-base.bin"] {
+                let url = directory.appendingPathComponent(name)
+                if FileManager.default.fileExists(atPath: url.path) { next.modelPath = url.path; break }
+            }
+        }
+        return next
+    }
+
     var engineIdentity: String {
-        "\(whisperServerPath)|\(modelPath)|\(bindHost)|\(bindPort)|\(language)|\(effectiveThreads)"
+        "\(engine.rawValue)|\(whisperServerPath)|\(modelPath)|\(bindHost)|\(bindPort)|\(language)|\(effectiveThreads)"
     }
 
     // Never bind or POST off-box, even if config.json was edited by hand.

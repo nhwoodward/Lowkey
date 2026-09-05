@@ -9,7 +9,7 @@ struct HistoryItem: Codable, Equatable {
     var audioFileName: String?
 
     var audioURL: URL? {
-        guard let audioFileName else { return nil }
+        guard let audioFileName, audioFileName == (audioFileName as NSString).lastPathComponent else { return nil }
         return Config.historyDirectory.appendingPathComponent(audioFileName)
     }
 }
@@ -45,19 +45,27 @@ final class HistoryStore {
         listeners.removeValue(forKey: id)
     }
 
-    private var fileURL: URL {
-        Config.supportDirectory.appendingPathComponent("history.json")
+    private let directory: URL
+    private var fileURL: URL { directory.appendingPathComponent("history.json") }
+    private var audioDirectory: URL { directory.appendingPathComponent("history", isDirectory: true) }
+
+    init(directory: URL = Config.supportDirectory) {
+        self.directory = directory
+        try? FileManager.default.createDirectory(at: audioDirectory, withIntermediateDirectories: true)
+        load()
     }
 
-    private init() {
-        load()
+    private func audioURL(for item: HistoryItem) -> URL? {
+        guard let name = item.audioFileName, name == (name as NSString).lastPathComponent else { return nil }
+        return audioDirectory.appendingPathComponent(name)
     }
 
     func add(text: String, duration: TimeInterval, language: String, audioURL: URL?) {
         var name: String?
         if let audioURL {
-            let destName = UUID().uuidString + ".wav"
-            let dest = Config.historyDirectory.appendingPathComponent(destName)
+            let ext = audioURL.pathExtension.isEmpty ? "wav" : audioURL.pathExtension
+            let destName = UUID().uuidString + "." + ext
+            let dest = audioDirectory.appendingPathComponent(destName)
             if keepAudio(from: audioURL, to: dest) {
                 name = destName
             }
@@ -77,17 +85,13 @@ final class HistoryStore {
 
     private func keepAudio(from source: URL, to dest: URL) -> Bool {
         let fm = FileManager.default
-        try? fm.removeItem(at: dest)
+        // The caller retains ownership of its recording. This also makes
+        // history pruning and deletion safe for imported voice notes.
         do {
-            try fm.moveItem(at: source, to: dest)
-            return fm.fileExists(atPath: dest.path)
+            try fm.copyItem(at: source, to: dest)
+            return true
         } catch {
-            do {
-                try fm.copyItem(at: source, to: dest)
-                return fm.fileExists(atPath: dest.path)
-            } catch {
-                return false
-            }
+            return false
         }
     }
 
@@ -98,7 +102,7 @@ final class HistoryStore {
     }
 
     func delete(id: UUID) {
-        if let item = items.first(where: { $0.id == id }), let url = item.audioURL {
+        if let item = items.first(where: { $0.id == id }), let url = audioURL(for: item) {
             try? FileManager.default.removeItem(at: url)
         }
         items.removeAll { $0.id == id }
@@ -108,7 +112,7 @@ final class HistoryStore {
     private func trim() {
         if items.count <= limit { return }
         for extra in items.suffix(from: limit) {
-            if let url = extra.audioURL {
+            if let url = audioURL(for: extra) {
                 try? FileManager.default.removeItem(at: url)
             }
         }

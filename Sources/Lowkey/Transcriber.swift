@@ -29,7 +29,7 @@ enum Transcriber {
     static func warmUp(config: Config) {
         // Parakeet stays resident on the Neural Engine; only the whisper
         // HTTP path benefits from pre-heating.
-        if config.engine == .parakeet, ParakeetEngine.shared.ready { return }
+        if config.prefersParakeet, ParakeetEngine.shared.ready { return }
         touchLock.lock()
         let recent = Date().timeIntervalSince(lastEngineTouch) < 20
         if !recent { lastEngineTouch = Date() }
@@ -79,7 +79,7 @@ enum Transcriber {
         defer { touchEngine() }
         let started = Date()
         let audio = try Data(contentsOf: fileURL)
-        guard audio.count > 800 else { return .silence }
+        guard audio.count >= 6444 else { return .silence }
         // ~3 minutes of 16 kHz mono PCM plus a WAV header.
         guard audio.count < 6_000_000 else {
             AppLog.line("transcribe rejected oversized wav bytes=\(audio.count)")
@@ -89,7 +89,7 @@ enum Transcriber {
         // Primary path: Parakeet on the Neural Engine. Any failure falls
         // through to whisper below, whose own recovery can respawn the
         // server on demand.
-        if config.engine == .parakeet, ParakeetEngine.shared.ready {
+        if config.prefersParakeet, ParakeetEngine.shared.ready {
             do {
                 let raw = try ParakeetEngine.shared.transcribe(fileURL: fileURL)
                 let outcome = finish(raw, config: config)
@@ -133,7 +133,7 @@ enum Transcriber {
         if audioCtx < 1500 {
             field("audio_ctx", String(audioCtx))
         }
-        let hint = VocabularyStore.shared.promptHint
+        let hint = onMain { VocabularyStore.shared.promptHint }
         if !hint.isEmpty {
             field("prompt", hint)
         }
@@ -149,46 +149,57 @@ enum Transcriber {
         request.timeoutInterval = 120
         request.httpBody = body
 
+        let reply = HTTPReply()
         let sem = DispatchSemaphore(value: 0)
-        var resultData: Data?
-        var resultError: Error?
-        Metrics.session.dataTask(with: request) { data, _, error in
-            resultData = data
-            resultError = error
+        let task = Metrics.session.dataTask(with: request) { data, response, error in
+            reply.set(data: data, response: response, error: error)
             sem.signal()
-        }.resume()
-        _ = sem.wait(timeout: .now() + 120)
+        }
+        task.resume()
+        guard sem.wait(timeout: .now() + request.timeoutInterval) == .success else {
+            task.cancel()
+            throw URLError(.timedOut)
+        }
+        let raw = try reply.text()
+        let outcome = finish(raw, config: config)
+        AppLog.line(String(format: "transcribe ok=%.2fs bytes=%d outcome=%@ engine=whisper",
+                           Date().timeIntervalSince(started), audio.count, describe(outcome)))
+        return outcome
+    }
 
-        let elapsed = Date().timeIntervalSince(started)
-        if let resultError {
-            AppLog.line(String(format: "transcribe error=%.2fs bytes=%d %@", elapsed, audio.count, resultError.localizedDescription))
-            throw resultError
+    static func decodeResponse(data: Data, response: URLResponse?) throws -> String {
+        guard let http = response as? HTTPURLResponse else { throw TranscriberError.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else {
+            throw TranscriberError.httpStatus(http.statusCode)
         }
-        guard let resultData, !resultData.isEmpty else {
-            AppLog.line(String(format: "transcribe empty=%.2fs bytes=%d", elapsed, audio.count))
-            throw TranscriberError.emptyResponse
+        // We explicitly request JSON. An HTML error page or malformed object
+        // must never enter history, the clipboard, or the focused application.
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw TranscriberError.invalidResponse
         }
+        if let error = object["error"] {
+            throw TranscriberError.server(error as? String ?? "Whisper could not transcribe this recording.")
+        }
+        guard let text = object["text"] as? String else { throw TranscriberError.invalidResponse }
+        return text
+    }
 
-        if let object = try? JSONSerialization.jsonObject(with: resultData) as? [String: Any] {
-            if let text = object["text"] as? String {
-                let outcome = finish(text, config: config)
-                let noSpeech = object["no_speech_prob"] as? Double
-                AppLog.line(String(format: "transcribe ok=%.2fs bytes=%d outcome=%@ no_speech=%@", elapsed, audio.count, describe(outcome), noSpeech.map { String(format: "%.2f", $0) } ?? "-"))
-                // Keep real text even when Whisper also reports a high
-                // no-speech probability. Empty text is the only silence.
-                return outcome
-            }
-            if let error = object["error"] as? String {
-                AppLog.line(String(format: "transcribe server=%.2fs %@", elapsed, error))
-                throw TranscriberError.server(error)
-            }
+    private final class HTTPReply {
+        private let lock = NSLock()
+        private var result: Result<String, Error> = .failure(URLError(.timedOut))
+        func set(data: Data?, response: URLResponse?, error: Error?) {
+            let value: Result<String, Error>
+            if let error { value = .failure(error) }
+            else { value = Result { try Transcriber.decodeResponse(data: data ?? Data(), response: response) } }
+            lock.lock()
+            result = value
+            lock.unlock()
         }
-        if let text = String(data: resultData, encoding: .utf8) {
-            let outcome = finish(text, config: config)
-            AppLog.line(String(format: "transcribe text=%.2fs bytes=%d outcome=%@", elapsed, audio.count, describe(outcome)))
-            return outcome
+        func text() throws -> String {
+            lock.lock()
+            defer { lock.unlock() }
+            return try result.get()
         }
-        throw TranscriberError.emptyResponse
     }
 
     // Diagnostic instrumentation: splits every request into connect / send /
@@ -267,13 +278,17 @@ enum Transcriber {
         return result
     }
 
+    private static func onMain<T>(_ work: () -> T) -> T {
+        if Thread.isMainThread { return work() }
+        return DispatchQueue.main.sync(execute: work)
+    }
+
     private static func finish(_ raw: String, config: Config) -> TranscriptOutcome {
         let text = clean(raw)
         if case .discardedNoise = text { return .discardedNoise }
         if case .silence = text { return .silence }
         guard case .text(var value) = text else { return .silence }
-        value = VocabularyStore.shared.apply(to: value)
-        value = SnippetStore.shared.apply(to: value)
+        value = onMain { SnippetStore.shared.apply(to: VocabularyStore.shared.apply(to: value)) }
         if config.punctuationMode == .none {
             value = value.replacingOccurrences(of: "[\\p{P}]+", with: "", options: .regularExpression)
                 .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
@@ -302,34 +317,24 @@ enum Transcriber {
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
         if compact.isEmpty { return .silence }
 
-        // Keep real one-word replies. Only drop phrases Whisper invents
-        // when the room is quiet.
-        let junk = Set([
-            "thanks for watching", "thank you for watching", "thanks for listening",
-            "thank you for listening", "subtitles by the amara.org community",
-            "please subscribe", "like and subscribe", "please like and subscribe",
-            "thanks for watching please subscribe", "see you next time",
-            "the end", "uh", "um", "hmm", "mm hmm", "this is a test",
-            "music", "applause", "silence", "blank audio", "you",
-        ])
-        if junk.contains(compact) { return .discardedNoise }
-
-        let words = compact.split(separator: " ").map(String.init)
-        if words.count <= 3, words.allSatisfy({ junk.contains($0) }) {
-            return .discardedNoise
-        }
+        // Without authoritative no-speech evidence, ordinary words and
+        // phrases (including "you" and "this is a test") are valid dictation.
         return .text(trimmed)
     }
 }
 
 enum TranscriberError: LocalizedError {
     case emptyResponse
+    case invalidResponse
+    case httpStatus(Int)
     case tooLarge
     case server(String)
 
     var errorDescription: String? {
         switch self {
         case .emptyResponse: return "Whisper returned no text."
+        case .invalidResponse: return "Whisper returned an invalid response. Please try again."
+        case .httpStatus(let status): return "Whisper could not transcribe the recording (HTTP \(status))."
         case .tooLarge: return "Recording is too long."
         case .server(let message): return message
         }

@@ -23,18 +23,9 @@ enum AppAppearance: String, CaseIterable, Codable {
 }
 
 enum Theme {
-    // Warm cream and near-black palette. Neutrals stay tinted so nothing
-    // reads as flat grey, without a colored brand accent.
-    static let paper = dynamic("paper") { dark in
-        dark
-            ? NSColor(calibratedRed: 0.075, green: 0.070, blue: 0.064, alpha: 1)
-            : NSColor(calibratedRed: 0.985, green: 0.973, blue: 0.958, alpha: 1)
-    }
-    static let sidebar = dynamic("sidebar") { dark in
-        dark
-            ? NSColor(calibratedRed: 0.098, green: 0.091, blue: 0.084, alpha: 1)
-            : NSColor(calibratedRed: 0.962, green: 0.946, blue: 0.926, alpha: 1)
-    }
+    // Semantic system colors follow appearance, contrast, and user accents.
+    static let paper = NSColor.windowBackgroundColor
+    static let sidebar = NSColor.windowBackgroundColor
     static let ink = NSColor.labelColor
     static let inkMuted = NSColor.secondaryLabelColor
     static let inkFaint = NSColor.tertiaryLabelColor
@@ -58,21 +49,9 @@ enum Theme {
             ? NSColor(calibratedRed: 0.138, green: 0.127, blue: 0.117, alpha: 1)
             : NSColor(calibratedRed: 0.955, green: 0.938, blue: 0.915, alpha: 1)
     }
-    static let card = dynamic("card") { dark in
-        dark
-            ? NSColor(calibratedRed: 0.118, green: 0.109, blue: 0.100, alpha: 1)
-            : NSColor(calibratedRed: 0.998, green: 0.993, blue: 0.985, alpha: 1)
-    }
-    static let cardHover = dynamic("cardHover") { dark in
-        dark
-            ? NSColor(calibratedRed: 0.148, green: 0.137, blue: 0.126, alpha: 1)
-            : NSColor(calibratedRed: 0.992, green: 0.981, blue: 0.964, alpha: 1)
-    }
-    static let cardSelected = dynamic("cardSelected") { dark in
-        dark
-            ? NSColor(calibratedRed: 0.178, green: 0.165, blue: 0.152, alpha: 1)
-            : NSColor(calibratedRed: 0.958, green: 0.946, blue: 0.928, alpha: 1)
-    }
+    static let card = NSColor.controlBackgroundColor
+    static let cardHover = NSColor.quaternaryLabelColor.withAlphaComponent(0.08)
+    static let cardSelected = NSColor.selectedContentBackgroundColor.withAlphaComponent(0.14)
     static let rule = dynamic("rule") { dark in
         dark
             ? NSColor(calibratedRed: 1, green: 0.93, blue: 0.88, alpha: 0.10)

@@ -22,39 +22,36 @@
 
 Cloud dictation wants an account, a subscription, and your audio. Local dictation usually wants your GPU, and on a busy 8 GB Mac the GPU is already spoken for.
 
-Lowkey uses the one processor nothing else is fighting over.
+Lowkey gives local speech recognition a dedicated path through Apple's Neural Engine.
 
-Hold **Right Command**, talk, let go. [NVIDIA Parakeet](https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml) runs on the **Apple Neural Engine** inside the app itself: no server, no GPU time, and dictation stays fast even while the rest of the machine compiles, renders, or swaps. The words land wherever the cursor is. A short utterance transcribes in about a quarter of a second; a half-minute monologue in about one.
+Hold **Right Command**, talk, let go. [NVIDIA Parakeet v2](https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v2-coreml) runs on the **Apple Neural Engine** inside the app itself: no separate server for primary recognition. Its English-only vocabulary keeps English dictation from switching to another language. The words land wherever the cursor is. Recognition time varies with the recording and current system load.
 
 Whisper stays on board as the safety net. It covers dictation while Parakeet's model downloads on first launch, takes over automatically if Parakeet ever fails, and handles non-English dictation.
 
-<p align="center">
-  <img alt="Lowkey dictation window" src="docs/images/window.png" width="86%" />
-</p>
+
 
 ## Features
 
+- **Native macOS interface** - system toolbars and grouped settings. The floating recorder uses Liquid Glass on macOS 26+, with an adaptive material on macOS 14 and 15. Release your shortcut or click the waveform bar to finish; press Escape to cancel.
 - **Hold to talk** - Right Command by default. Switch to Left Command, Right Option, or Fn. Press **Esc** while holding to discard the take.
-- **Neural Engine first** - Parakeet TDT (int8) transcribes in-process on the ANE. It is immune to GPU contention and thermal throttling, and the app idles under 30 MB because the ANE manages the model's memory.
+- **Neural Engine first** - Parakeet TDT (int8) transcribes in-process on the ANE. This keeps the primary recognition workload off the GPU. Performance and memory use depend on the model, audio, hardware, and current system load.
 - **Whisper as the fallback** - `whisper-server` on `127.0.0.1` with `ggml-small.en-q5_1`, greedy decode, and encoder cropping sized to the clip. If Parakeet is unavailable for any reason, dictation still works.
 - **Warm before you finish talking** - engines pre-heat when recording starts, so the audio always hits a hot pipeline.
 - **Spoken pauses stay spoken** - segment breaks, stray ellipses, and the capitalization glitches they cause are cleaned out of the transcript instead of pasted into your text.
 - **Paste, then keep the words** - sends directly to the focused WezTerm pane when WezTerm is active, or uses a keystroke paste elsewhere. If delivery cannot land, the transcript is still on the clipboard.
 - **Your names, your phrases** - custom vocabulary for names and spelling, plus spoken snippets that expand into saved text.
-- **History stays here** - replay, recopy, or delete. Audio and transcripts live under Application Support, not this repository.
+- **History stays here** - replay, recopy, or delete. Imported audio is copied and normalized, and original files remain untouched. Double-click a history entry to read or copy its full text. Audio and transcripts live under Application Support, not this repository.
 - **Menu bar, not a dock hog** - hide from the Dock, start at login, optionally pause Music or Spotify while you talk.
 - **Hardened Runtime** - local builds are signed with a self-signed `Lowkey Local` identity so Microphone and Accessibility survive rebuilds.
 
-<p align="center">
-  <img alt="General settings" src="docs/images/settings.png" width="48%" />
-  <img alt="Dictation settings" src="docs/images/settings-dictation.png" width="48%" />
-</p>
+
 
 ## Quick Start
 
 ### Requirements
 
 - macOS 14 or later. Apple Silicon for the Neural Engine; Intel Macs run on the Whisper engine alone
+- Xcode 26 or later when building with Liquid Glass support (older toolchains use the material fallback)
 - About 8 GB of RAM or more
 - [Homebrew](https://brew.sh) and the Xcode Command Line Tools
 
@@ -102,7 +99,7 @@ The installer fetches the Whisper fallback model (~181 MB); Lowkey downloads the
 
 You talk to one shortcut. Lowkey records 16 kHz PCM on this Mac and transcribes it on the Neural Engine, in-process. The transcript is cleaned (pause artifacts out, your vocabulary in) and delivered to the app that had focus. WezTerm receives it through its CLI; other apps receive a keystroke paste. If delivery will not land, Cmd+V still has the same text.
 
-Why the Neural Engine matters: on a working Mac the CPU and GPU are shared with everything else - builds, browsers, compositing - and dictation queues behind all of it. The ANE is idle on almost every machine, so transcription time stays flat whether the Mac is quiet or under full load.
+Why the Neural Engine matters: on a working Mac the CPU and GPU are shared with everything else - builds, browsers, compositing - and dictation queues behind all of it. Running Parakeet through Core ML reduces reliance on the GPU for primary transcription; it does not guarantee constant latency under load.
 
 ## Privacy
 
@@ -121,6 +118,30 @@ Audio and transcripts stay on the Mac.
 - Config: `~/Library/Application Support/Lowkey/config.json` (`"engine": "parakeet"` or `"whisper"`)
 - Logs: `~/Library/Application Support/Lowkey/logs/`
 
+## Development and verification
+
+```bash
+swift test
+./script/build_and_run.sh
+```
+
+The development app uses its own bundle identifier, port (18791), shortcut
+(Right Option), and data under `dist/development-support`. It does not replace
+the installed app or use its dictation history. Grant Microphone and
+Accessibility to **Lowkey Development** to test recording and paste delivery.
+The run script reuses an existing Developer ID identity, when available, to
+keep those grants stable across rebuilds.
+
+The automated suite covers history ownership, fallback recovery, HTTP response
+validation, clipboard preservation, audio conversion, modifier handling, and
+process timeouts. Physical microphone capture, cross-app paste, and visual
+appearance still require interactive validation.
+
+For Auto detect or non-English dictation, select the language and a multilingual Whisper
+model in Settings > Dictation. An installed `ggml-small.bin`,
+`ggml-small-q5_1.bin`, or `ggml-base.bin` alongside the English model is selected
+automatically. The default English-only model cannot transcribe other languages.
+
 ## Rebuild
 
 ```bash
@@ -131,7 +152,7 @@ open ~/Applications/Lowkey.app
 To create a release archive locally:
 
 ```bash
-LOWKEY_VERSION=2.0.0 ./Scripts/package-release.sh
+LOWKEY_VERSION=2.1.0 ./Scripts/package-release.sh
 ```
 
 The GitHub Actions workflow at `.github/workflows/release.yml` builds `Lowkey-arm64.zip` and `Lowkey-x86_64.zip` whenever a `v*` tag is pushed. It also supports manually creating a release from the Actions tab.
@@ -161,7 +182,7 @@ xcrun notarytool store-credentials lowkey-notary \
 
 ## Credits
 
-Primary speech recognition is [NVIDIA Parakeet TDT](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (CC-BY-4.0), run on the Apple Neural Engine through [FluidAudio](https://github.com/FluidInference/FluidAudio)'s CoreML conversion. Fallback recognition is [OpenAI Whisper](https://github.com/openai/whisper) (MIT) through [whisper.cpp](https://github.com/ggml-org/whisper.cpp) `whisper-server`.
+Primary speech recognition is [NVIDIA Parakeet TDT v2](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) (CC-BY-4.0), run on the Apple Neural Engine through [FluidAudio](https://github.com/FluidInference/FluidAudio)'s CoreML conversion. Fallback recognition is [OpenAI Whisper](https://github.com/openai/whisper) (MIT) through [whisper.cpp](https://github.com/ggml-org/whisper.cpp) `whisper-server`.
 
 Lowkey is an independent Mac app. It is not affiliated with NVIDIA, OpenAI, Fluid Inference, or whisper.cpp.
 

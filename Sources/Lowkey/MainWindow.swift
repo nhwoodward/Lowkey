@@ -2,7 +2,7 @@ import AppKit
 import AVFoundation
 import UniformTypeIdentifiers
 
-final class MainWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, AVAudioPlayerDelegate {
+final class MainWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, AVAudioPlayerDelegate, NSToolbarDelegate {
     var onOpenSettings: (() -> Void)?
     var onLanguageChange: ((String) -> Void)?
     var onUpload: ((URL) -> Void)?
@@ -19,20 +19,26 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSTableV
 
     init(language: String) {
         self.language = language
-        let window = ChromeWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 980, height: 720),
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 820, height: 640),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "Lowkey"
-        window.titleVisibility = .hidden
-        window.minSize = NSSize(width: 820, height: 560)
+        window.title = "Dictation History"
+        window.titleVisibility = .visible
+        window.minSize = NSSize(width: 640, height: 420)
         window.titlebarAppearsTransparent = true
-        window.backgroundColor = Theme.paper
+        window.backgroundColor = .windowBackgroundColor
         window.center()
         super.init(window: window)
         window.delegate = self
+        window.setFrameAutosaveName("LowkeyHistory")
+        let toolbar = NSToolbar(identifier: "LowkeyHistoryToolbar")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        window.toolbar = toolbar
+        window.toolbarStyle = .unified
         let root = build()
         window.contentView = root
         reload()
@@ -54,209 +60,120 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSTableV
         }
     }
 
+    func setBusy(_ busy: Bool) {
+        window?.toolbar?.items.first(where: { $0.itemIdentifier.rawValue == "import" })?.isEnabled = !busy
+    }
+
     private func build() -> NSView {
         let root = NSView()
-        let sidebar = makeSidebar()
-        let content = makeContent()
-        sidebar.translatesAutoresizingMaskIntoConstraints = false
-        content.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(sidebar)
-        root.addSubview(content)
-        NSLayoutConstraint.activate([
-            sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            sidebar.topAnchor.constraint(equalTo: root.topAnchor),
-            sidebar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            sidebar.widthAnchor.constraint(equalToConstant: Theme.mainSidebarWidth),
-            content.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
-            content.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            content.topAnchor.constraint(equalTo: root.topAnchor),
-            content.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-        ])
-        return root
-    }
-
-    private func makeSidebar() -> NSView {
-        let view = ThemedFillView(fill: Theme.sidebar)
-
-        let mark = BrandMark()
-        mark.translatesAutoresizingMaskIntoConstraints = false
-
-        let brand = NSTextField(labelWithString: "Lowkey")
-        brand.font = Theme.display(16, weight: .bold)
-        brand.textColor = Theme.ink
-        brand.translatesAutoresizingMaskIntoConstraints = false
-
-        let dictation = InteractiveButton.nav("mic.fill", "Dictation", tag: 0, target: self, action: #selector(selectDictation))
-        dictation.isSelected = true
-        dictation.translatesAutoresizingMaskIntoConstraints = false
-        dictationItem = dictation
-
-        let settings = InteractiveButton.nav("gearshape", "Settings", tag: 1, target: self, action: #selector(openSettings))
-        settings.translatesAutoresizingMaskIntoConstraints = false
-
-        let rule = Hairline()
-
-        view.addSubview(mark)
-        view.addSubview(brand)
-        view.addSubview(dictation)
-        view.addSubview(settings)
-        view.addSubview(rule)
-        NSLayoutConstraint.activate([
-            mark.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
-            mark.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            mark.widthAnchor.constraint(equalToConstant: 27),
-            mark.heightAnchor.constraint(equalToConstant: 27),
-            brand.centerYAnchor.constraint(equalTo: mark.centerYAnchor),
-            brand.leadingAnchor.constraint(equalTo: mark.trailingAnchor, constant: 9),
-            dictation.topAnchor.constraint(equalTo: mark.bottomAnchor, constant: Theme.space5),
-            dictation.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
-            dictation.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
-            dictation.heightAnchor.constraint(equalToConstant: Theme.navHeight),
-            settings.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
-            settings.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
-            settings.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
-            settings.heightAnchor.constraint(equalToConstant: Theme.navHeight),
-            rule.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            rule.topAnchor.constraint(equalTo: view.topAnchor),
-            rule.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            rule.widthAnchor.constraint(equalToConstant: 1),
-        ])
-        return view
-    }
-
-    private func makeContent() -> NSView {
-        let view = ThemedFillView(fill: Theme.paper)
-
-        let title = NSTextField(labelWithString: "Dictation")
-        title.font = Theme.display(21, weight: .bold)
-        title.textColor = Theme.ink
-        title.translatesAutoresizingMaskIntoConstraints = false
-
-        let hero = heroCard()
-        hero.translatesAutoresizingMaskIntoConstraints = false
-
-        let recents = NSTextField(labelWithString: "Recent Transcriptions")
-        recents.font = Theme.display(16, weight: .semibold)
-        recents.textColor = Theme.ink
-        recents.translatesAutoresizingMaskIntoConstraints = false
-
+        let heading = NSTextField(labelWithString: "Your words, on this Mac.")
+        heading.font = .systemFont(ofSize: 20, weight: .semibold)
+        let caption = NSTextField(labelWithString: "Hold your shortcut to dictate, or import an audio recording.")
+        caption.font = .systemFont(ofSize: 13)
+        caption.textColor = .secondaryLabelColor
+        let intro = NSStackView(views: [heading, caption])
+        intro.orientation = .vertical
+        intro.alignment = .leading
+        intro.spacing = 6
+        intro.translatesAutoresizingMaskIntoConstraints = false
         table.headerView = nil
         table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("item")))
         table.delegate = self
         table.dataSource = self
-        table.rowHeight = Theme.historyRowHeight
+        table.rowHeight = 100
         table.backgroundColor = .clear
         table.selectionHighlightStyle = .none
         table.intercellSpacing = NSSize(width: 0, height: 8)
         table.allowsEmptySelection = true
-        table.allowsMultipleSelection = false
-        table.focusRingType = .none
-        table.usesAlternatingRowBackgroundColors = false
         table.target = self
-        table.doubleAction = #selector(copySelected)
+        table.doubleAction = #selector(showSelectedTranscript)
         table.onDelete = { [weak self] in self?.deleteSelected() }
         table.onCopy = { [weak self] in self?.copySelected() }
         table.onPaste = { [weak self] in self?.pasteSelected() }
         table.onPlay = { [weak self] in self?.playSelected() }
         table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
-        if let column = table.tableColumns.first {
-            column.resizingMask = .autoresizingMask
-        }
+        table.tableColumns.first?.resizingMask = .autoresizingMask
         let scroll = NSScrollView()
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
-        scroll.borderType = .noBorder
         scroll.drawsBackground = false
         scroll.contentView.drawsBackground = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
-
-        emptyLabel.stringValue = "Nothing here yet. Hold your shortcut and say hi."
-        emptyLabel.font = NSFont.systemFont(ofSize: 13)
-        emptyLabel.textColor = Theme.inkMuted
+        emptyLabel.stringValue = "No transcriptions yet. Start with your voice."
+        emptyLabel.font = .systemFont(ofSize: 13)
+        emptyLabel.textColor = .secondaryLabelColor
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        view.addSubview(title)
-        view.addSubview(hero)
-        view.addSubview(recents)
-        view.addSubview(scroll)
-        view.addSubview(emptyLabel)
+        root.addSubview(intro)
+        root.addSubview(scroll)
+        root.addSubview(emptyLabel)
         NSLayoutConstraint.activate([
-            title.topAnchor.constraint(equalTo: view.topAnchor, constant: 22),
-            title.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Theme.space7),
-            hero.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 18),
-            hero.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Theme.space7),
-            hero.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Theme.space7),
-            recents.topAnchor.constraint(equalTo: hero.bottomAnchor, constant: Theme.space6),
-            recents.leadingAnchor.constraint(equalTo: hero.leadingAnchor),
-            scroll.topAnchor.constraint(equalTo: recents.bottomAnchor, constant: Theme.space3),
-            scroll.leadingAnchor.constraint(equalTo: hero.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: hero.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -Theme.space5),
-            emptyLabel.topAnchor.constraint(equalTo: recents.bottomAnchor, constant: Theme.space7),
-            emptyLabel.leadingAnchor.constraint(equalTo: recents.leadingAnchor),
+            intro.topAnchor.constraint(equalTo: root.topAnchor, constant: 24),
+            intro.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
+            intro.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -24),
+            scroll.topAnchor.constraint(equalTo: intro.bottomAnchor, constant: 22),
+            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
+            emptyLabel.centerXAnchor.constraint(equalTo: root.centerXAnchor),
+            emptyLabel.centerYAnchor.constraint(equalTo: root.centerYAnchor),
         ])
-        return view
+        return root
     }
 
-    private func heroCard() -> NSView {
-        let card = GradientCard(radius: Theme.radiusXl)
-
-        let motif = WaveMotifView()
-        motif.translatesAutoresizingMaskIntoConstraints = false
-
-        let heading = PassthroughLabel(labelWithString: "Say it out loud.")
-        heading.font = Theme.display(24, weight: .bold)
-        heading.textColor = Theme.ink
-        heading.translatesAutoresizingMaskIntoConstraints = false
-
-        let body = PassthroughLabel(wrappingLabelWithString: "Hold your shortcut and talk. The words land wherever your cursor is, and nothing ever leaves this Mac.")
-        body.font = NSFont.systemFont(ofSize: 13)
-        body.textColor = Theme.inkMuted
-        body.preferredMaxLayoutWidth = 460
-        body.translatesAutoresizingMaskIntoConstraints = false
-
-        languageButton.removeAllItems()
-        Config.languages.forEach { languageButton.addItem(withTitle: $0.1) }
-        if let index = Config.languages.firstIndex(where: { $0.0 == language }) {
-            languageButton.selectItem(at: index)
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        ["import", "vocabulary", "language", "settings"].map { NSToolbarItem.Identifier($0) } + [.flexibleSpace]
+    }
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [NSToolbarItem.Identifier("import"), NSToolbarItem.Identifier("vocabulary"), .flexibleSpace,
+         NSToolbarItem.Identifier("language"), NSToolbarItem.Identifier("settings")]
+    }
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar: Bool) -> NSToolbarItem? {
+        let item = NSToolbarItem(itemIdentifier: id)
+        if id.rawValue == "language" {
+            Config.languages.forEach { languageButton.addItem(withTitle: $0.1) }
+            setLanguage(language)
+            languageButton.target = self
+            languageButton.action = #selector(changeLanguage)
+            languageButton.setAccessibilityLabel("Dictation language")
+            item.view = languageButton
+            item.label = "Language"
+            return item
         }
-        languageButton.target = self
-        languageButton.action = #selector(changeLanguage)
-        languageButton.setAccessibilityLabel("Dictation language")
+        let symbol: String
+        switch id.rawValue {
+        case "import": item.label = "Import Audio"; symbol = "square.and.arrow.down"; item.action = #selector(uploadNote)
+        case "vocabulary": item.label = "Vocabulary"; symbol = "character.book.closed"; item.action = #selector(addVocabulary)
+        case "settings": item.label = "Settings"; symbol = "gearshape"; item.action = #selector(openSettings)
+        default: return nil
+        }
+        item.autovalidates = false
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: item.label)
+        item.toolTip = item.label
+        item.target = self
+        return item
+    }
 
-        let vocab = InteractiveButton.pill("Add Custom Vocabulary", target: self, action: #selector(addVocabulary))
-        let upload = InteractiveButton.pill("Upload Voice Note", target: self, action: #selector(uploadNote))
-
-        let actions = NSStackView(views: [vocab, upload])
-        actions.orientation = .horizontal
-        actions.spacing = 10
-        actions.translatesAutoresizingMaskIntoConstraints = false
-
-        card.addSubview(motif)
-        card.addSubview(heading)
-        card.addSubview(body)
-        card.addSubview(languageButton)
-        card.addSubview(actions)
-        NSLayoutConstraint.activate([
-            heading.topAnchor.constraint(equalTo: card.topAnchor, constant: 22),
-            heading.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 22),
-            languageButton.centerYAnchor.constraint(equalTo: heading.centerYAnchor),
-            languageButton.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
-            motif.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -30),
-            motif.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -18),
-            motif.widthAnchor.constraint(equalToConstant: 150),
-            motif.heightAnchor.constraint(equalToConstant: 54),
-            body.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 8),
-            body.leadingAnchor.constraint(equalTo: heading.leadingAnchor),
-            body.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor, constant: -22),
-            actions.topAnchor.constraint(equalTo: body.bottomAnchor, constant: Theme.space4),
-            actions.leadingAnchor.constraint(equalTo: heading.leadingAnchor),
-            actions.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -20),
-            vocab.heightAnchor.constraint(equalToConstant: Theme.pillHeight),
-            upload.heightAnchor.constraint(equalToConstant: Theme.pillHeight),
-        ])
-        return card
+    @objc private func showSelectedTranscript() {
+        guard let item = selectedItem(), let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Transcription"
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 460, height: 240))
+        let text = NSTextView(frame: scroll.bounds)
+        text.string = item.text
+        text.isEditable = false
+        text.isSelectable = true
+        text.font = .systemFont(ofSize: 14)
+        text.textContainerInset = NSSize(width: 8, height: 8)
+        text.autoresizingMask = [.width]
+        scroll.hasVerticalScroller = true
+        scroll.documentView = text
+        alert.accessoryView = scroll
+        alert.addButton(withTitle: "Done")
+        alert.addButton(withTitle: "Copy")
+        alert.beginSheetModal(for: window) { response in
+            if response == .alertSecondButtonReturn { self.copy(item) }
+        }
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -327,6 +244,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSTableV
     @objc private func uploadNote() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.audio]
+        panel.title = "Import Audio"
+        panel.message = "Transcribe up to two minutes of audio locally. Your original file stays where it is."
         panel.canChooseFiles = true
         if panel.runModal() == .OK, let url = panel.url {
             onUpload?(url)
@@ -400,10 +319,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSTableV
             reload()
             return
         }
-        player = try? AVAudioPlayer(contentsOf: url)
-        player?.delegate = self
-        player?.play()
-        playingID = item.id
+        do {
+            player = try AVAudioPlayer(contentsOf: url)
+            player?.delegate = self
+            playingID = player?.play() == true ? item.id : nil
+        } catch {
+            playingID = nil
+            let alert = NSAlert(error: error)
+            if let window { alert.beginSheetModal(for: window) }
+        }
         reload()
     }
 

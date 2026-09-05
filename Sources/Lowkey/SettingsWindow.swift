@@ -1,384 +1,253 @@
 import AppKit
 import AVFoundation
-import ServiceManagement
+import SwiftUI
+import Combine
 import UniformTypeIdentifiers
 
-final class SettingsWindowController: NSWindowController, NSWindowDelegate {
+final class SettingsWindowController: NSWindowController, NSToolbarDelegate {
     var onApply: ((Config) -> Void)?
-
-    private var draft: Config
-    private var page = 0
-    private let content = FlippedStackView()
-    private var navButtons: [InteractiveButton] = []
-    private var engineReady = false
-    private var engineError: String?
-    private var vocabEditor: ListEditorController?
+    private let model: SettingsModel
+    private var vocabularyEditor: ListEditorController?
     private var snippetEditor: ListEditorController?
+    private let pages = ["General", "Dictation", "Privacy"]
 
     init(config: Config, engineReady: Bool, engineError: String?) {
-        self.draft = config
-        self.engineReady = engineReady
-        self.engineError = engineError
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 820, height: 620),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Settings"
-        window.titlebarAppearsTransparent = true
+        model = SettingsModel(config: config, engineReady: engineReady, engineError: engineError)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 620),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.title = "General"
+        window.minSize = NSSize(width: 540, height: 530)
+        window.maxSize = NSSize(width: 900, height: 1000)
         window.isReleasedWhenClosed = false
-        window.backgroundColor = Theme.paper
+        window.setFrameAutosaveName("LowkeySettings")
         window.center()
         super.init(window: window)
-        window.delegate = self
-        let root = build()
-        window.contentView = root
-        showPage(0)
+        let toolbar = NSToolbar(identifier: "LowkeySettingsToolbar")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconAndLabel
+        toolbar.allowsUserCustomization = false
+        toolbar.selectedItemIdentifier = NSToolbarItem.Identifier("General")
+        window.toolbar = toolbar
+        window.toolbarStyle = .preference
+        model.onApply = { [weak self] next in self?.onApply?(next) }
+        model.onVocabulary = { [weak self] in self?.openVocabulary() }
+        model.onSnippets = { [weak self] in self?.openSnippets() }
+        window.contentView = NSHostingView(rootView: NativeSettingsView(model: model))
     }
 
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    required init?(coder: NSCoder) { nil }
 
+    func update(config: Config) { if model.config != config { model.config = config } }
     func refreshStatus(engineReady: Bool, engineError: String?) {
-        self.engineReady = engineReady
-        self.engineError = engineError
-        if page == 0 { showPage(0) }
+        model.engineReady = engineReady
+        model.engineError = engineError
+        model.refreshPermissions()
     }
 
-    func windowWillClose(_ notification: Notification) {
-        collect()
-        draft.save()
-        onApply?(draft)
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { pages.map { NSToolbarItem.Identifier($0) } }
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarAllowedItemIdentifiers(toolbar) }
+    func toolbarSelectableItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarAllowedItemIdentifiers(toolbar) }
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar: Bool) -> NSToolbarItem? {
+        guard let index = pages.firstIndex(of: id.rawValue) else { return nil }
+        let item = NSToolbarItem(itemIdentifier: id)
+        item.label = id.rawValue
+        item.image = NSImage(systemSymbolName: ["gearshape", "waveform", "hand.raised"][index], accessibilityDescription: id.rawValue)
+        item.target = self
+        item.action = #selector(selectPage(_:))
+        return item
     }
 
-    private func build() -> NSView {
-        let root = NSView()
-        let sidebar = ThemedFillView(fill: Theme.sidebar)
-        sidebar.translatesAutoresizingMaskIntoConstraints = false
-
-        let label = NSTextField(labelWithString: "SETTINGS")
-        label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = Theme.inkFaint
-        label.translatesAutoresizingMaskIntoConstraints = false
-
-        let general = InteractiveButton.nav("gearshape", "General", tag: 0, target: self, action: #selector(switchPage(_:)))
-        let dictation = InteractiveButton.nav("mic.fill", "Dictation", tag: 1, target: self, action: #selector(switchPage(_:)))
-        navButtons = [general, dictation]
-
-        let rule = Hairline()
-
-        sidebar.addSubview(label)
-        sidebar.addSubview(general)
-        sidebar.addSubview(dictation)
-        sidebar.addSubview(rule)
-
-        content.orientation = .vertical
-        content.alignment = .leading
-        content.spacing = 4
-        content.translatesAutoresizingMaskIntoConstraints = false
-
-        let scroller = NSScrollView()
-        scroller.drawsBackground = false
-        scroller.backgroundColor = Theme.paper
-        scroller.contentView.drawsBackground = false
-        scroller.borderType = .noBorder
-        scroller.hasVerticalScroller = true
-        scroller.autohidesScrollers = true
-        scroller.translatesAutoresizingMaskIntoConstraints = false
-        scroller.documentView = content
-        NSLayoutConstraint.activate([
-            content.widthAnchor.constraint(equalTo: scroller.contentView.widthAnchor),
-        ])
-
-        root.addSubview(sidebar)
-        root.addSubview(scroller)
-        NSLayoutConstraint.activate([
-            sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            sidebar.topAnchor.constraint(equalTo: root.topAnchor),
-            sidebar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            sidebar.widthAnchor.constraint(equalToConstant: Theme.sidebarWidth),
-            label.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 22),
-            label.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 18),
-            general.topAnchor.constraint(equalTo: label.bottomAnchor, constant: Theme.space3),
-            general.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 10),
-            general.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -10),
-            general.heightAnchor.constraint(equalToConstant: Theme.navHeight),
-            dictation.topAnchor.constraint(equalTo: general.bottomAnchor, constant: 4),
-            dictation.leadingAnchor.constraint(equalTo: general.leadingAnchor),
-            dictation.trailingAnchor.constraint(equalTo: general.trailingAnchor),
-            dictation.heightAnchor.constraint(equalToConstant: Theme.navHeight),
-            rule.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
-            rule.topAnchor.constraint(equalTo: sidebar.topAnchor),
-            rule.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor),
-            rule.widthAnchor.constraint(equalToConstant: 1),
-            scroller.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
-            scroller.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scroller.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
-            scroller.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-        ])
-        return root
+    @objc private func selectPage(_ sender: NSToolbarItem) {
+        model.page = sender.itemIdentifier.rawValue
+        window?.toolbar?.selectedItemIdentifier = sender.itemIdentifier
+        window?.title = model.page
+        model.refreshPermissions()
     }
 
-    @objc private func switchPage(_ sender: AnyObject) {
-        collect()
-        showPage((sender as? NSView)?.tag ?? 0)
-    }
-
-    private func showPage(_ index: Int) {
-        page = index
-        for button in navButtons {
-            button.isSelected = button.tag == index
-        }
-        content.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        content.edgeInsets = NSEdgeInsets(top: 24, left: 16, bottom: 28, right: 16)
-        if index == 0 {
-            renderGeneral()
-        } else {
-            renderDictation()
-        }
-    }
-
-    private func renderGeneral() {
-        addHeading("General")
-        addSection("FEATURES")
-        addToggle("speaker.wave.2.fill", NSColor.systemBlue, "Dictation sound", "Play a sound when you start and stop recording", draft.playSounds, #selector(toggleSounds))
-        addToggle("rectangle.bottomthird.inset.filled", NSColor.systemPurple, "Floating widget", "Show the Flow Bar when you are not dictating", draft.showBarAlways, #selector(toggleBar))
-        addToggle("dock.rectangle", NSColor.systemGreen, "Hide from dock", "Keep Lowkey in the menu bar only", draft.hideFromDock, #selector(toggleDock))
-        addSection("SYSTEM")
-        addMenuRow("circle.lefthalf.filled", NSColor.systemIndigo, "Appearance", "Follow the Mac, or lock light or dark", AppAppearance.allCases.map(\.title), AppAppearance.allCases.firstIndex(of: draft.appearance) ?? 0, #selector(changeAppearance(_:)))
-        addMicRow()
-        addActionRow("viewfinder", NSColor.systemPink, "Permissions", "Manage microphone and Accessibility", "Configure", #selector(openPermissions))
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.0.0"
-        addInfoRow("info.circle.fill", NSColor.systemBlue, "Version", "Lowkey \(version)  ·  on-device Parakeet + Whisper")
-        addToggle("power", NSColor.systemMint, "Start at Login", "Open Lowkey when you log in", draft.startAtLogin, #selector(toggleLogin))
-        addStatus()
-    }
-
-    private func renderDictation() {
-        addHeading("Dictation")
-        addSection("CONFIGURATION")
-        addMenuRow("globe", NSColor.systemBlue, "Dictation language", "Language used for transcription", Config.languages.map(\.1), selectedLanguageIndex(), #selector(changeLanguage(_:)))
-        addActionRow("character.book.closed.fill", NSColor.systemPurple, "Custom Vocabulary", "Names and terms to keep, plus spelling fixes", "Configure", #selector(openVocabulary))
-        addActionRow("textformat", NSColor.systemGreen, "Dictation Snippets", "Spoken shortcuts that expand into saved phrases", "Configure", #selector(openSnippets))
-        addMenuRow("text.quote", NSColor.systemOrange, "Punctuation behaviour", "Let Lowkey keep punctuation in the transcript", PunctuationMode.allCases.map(\.title), PunctuationMode.allCases.firstIndex(of: draft.punctuationMode) ?? 0, #selector(changePunctuation(_:)))
-        addMenuRow("doc.on.clipboard", NSColor.systemPink, "Clipboard behavior", "When to leave the transcript on the clipboard", ClipboardBehavior.allCases.map(\.title), ClipboardBehavior.allCases.firstIndex(of: draft.clipboardBehavior) ?? 1, #selector(changeClipboard(_:)))
-        addSection("SOUND")
-        addToggle("speaker.slash.fill", NSColor.systemBlue, "Auto-Pause Audio", "Pause Music or Spotify while you dictate", draft.autoPauseAudio, #selector(togglePause))
-        addSection("SHORTCUTS")
-        addMenuRow("keyboard", NSColor.systemPurple, "Start/Stop dictation", "Hold this key to record", DictationHotkey.allCases.map(\.title), DictationHotkey.allCases.firstIndex(of: draft.hotkey) ?? 0, #selector(changeHotkey(_:)))
-        addInfoRow("xmark", NSColor.systemMint, "Cancel Recording", "Press Esc to discard the current recording")
-    }
-
-    private func addHeading(_ title: String) {
-        let field = NSTextField(labelWithString: title)
-        field.font = Theme.display(21, weight: .bold)
-        field.textColor = Theme.ink
-        field.translatesAutoresizingMaskIntoConstraints = false
-        content.addArrangedSubview(field)
-        content.setCustomSpacing(16, after: field)
-    }
-
-    private func addSection(_ title: String) {
-        if let last = content.arrangedSubviews.last {
-            content.setCustomSpacing(20, after: last)
-        }
-        let field = NSTextField(labelWithString: title)
-        field.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        field.textColor = Theme.inkFaint
-        content.addArrangedSubview(field)
-        content.setCustomSpacing(6, after: field)
-    }
-
-    private func addToggle(_ symbol: String, _ color: NSColor, _ title: String, _ caption: String, _ on: Bool, _ action: Selector) {
-        let control = styledSwitch()
-        control.state = on ? .on : .off
-        control.target = self
-        control.action = action
-        control.setAccessibilityLabel(title)
-        let row = SettingsRow(symbol: symbol, color: color, title: title, caption: caption, accessory: control)
-        row.isInteractive = true
-        row.onActivate = { [weak control] in
-            guard let control else { return }
-            control.state = control.state == .on ? .off : .on
-            if let action = control.action {
-                _ = control.sendAction(action, to: control.target)
-            }
-        }
-        pin(row)
-    }
-
-    private func addMenuRow(_ symbol: String, _ color: NSColor, _ title: String, _ caption: String, _ items: [String], _ selected: Int, _ action: Selector) {
-        let pop = styledPopup()
-        items.forEach { pop.addItem(withTitle: $0) }
-        pop.selectItem(at: selected)
-        pop.target = self
-        pop.action = action
-        pop.setAccessibilityLabel(title)
-        let row = SettingsRow(symbol: symbol, color: color, title: title, caption: caption, accessory: pop)
-        row.isInteractive = true
-        row.onActivate = { [weak pop] in
-            pop?.performClick(nil)
-        }
-        pin(row)
-    }
-
-    private func addActionRow(_ symbol: String, _ color: NSColor, _ title: String, _ caption: String, _ buttonTitle: String, _ action: Selector) {
-        let button = InteractiveButton.pill(buttonTitle, target: self, action: action)
-        let row = SettingsRow(symbol: symbol, color: color, title: title, caption: caption, accessory: button)
-        row.isInteractive = true
-        row.onActivate = { [weak button] in
-            button?.performClick(nil)
-        }
-        pin(row)
-    }
-
-    private func addInfoRow(_ symbol: String, _ color: NSColor, _ title: String, _ caption: String) {
-        let row = SettingsRow(symbol: symbol, color: color, title: title, caption: caption, accessory: nil)
-        row.isInteractive = false
-        pin(row)
-    }
-
-    private func addMicRow() {
-        let pop = styledPopup()
-        pop.addItem(withTitle: "Auto (Default)")
-        let devices = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.microphone, .external],
-            mediaType: .audio,
-            position: .unspecified
-        ).devices
-        var selected = 0
-        for (index, device) in devices.enumerated() {
-            pop.addItem(withTitle: device.localizedName)
-            if device.uniqueID == draft.microphoneUID { selected = index + 1 }
-        }
-        pop.selectItem(at: selected)
-        pop.target = self
-        pop.action = #selector(changeMic(_:))
-        pop.identifier = NSUserInterfaceItemIdentifier(devices.map(\.uniqueID).joined(separator: "\u{1e}"))
-        pop.setAccessibilityLabel("Microphone")
-        let row = SettingsRow(symbol: "mic.fill", color: .systemOrange, title: "Microphone", caption: "Choose the microphone Lowkey should use", accessory: pop)
-        row.isInteractive = true
-        row.onActivate = { [weak pop] in
-            pop?.performClick(nil)
-        }
-        pin(row)
-    }
-
-    private func addStatus() {
-        if let last = content.arrangedSubviews.last {
-            content.setCustomSpacing(16, after: last)
-        }
-        let text: String
-        if ParakeetEngine.shared.ready {
-            text = "Parakeet ready on the Neural Engine"
-        } else if engineReady {
-            text = "Whisper ready on \(draft.bindHost):\(draft.bindPort)"
-        } else {
-            text = engineError ?? "Engine is not running"
-        }
-        let access = PasteService.isTrusted() ? "Accessibility is active." : "Accessibility still needs a grant."
-        let field = NSTextField(wrappingLabelWithString: "\(text)  \(access)")
-        field.font = NSFont.systemFont(ofSize: 11)
-        field.textColor = engineReady ? Theme.inkMuted : .systemOrange
-        content.addArrangedSubview(field)
-    }
-
-    private func pin(_ row: NSView) {
-        content.addArrangedSubview(row)
-        row.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -content.edgeInsets.left - content.edgeInsets.right).isActive = true
-    }
-
-    private func selectedLanguageIndex() -> Int {
-        Config.languages.firstIndex(where: { $0.0 == draft.language }) ?? 0
-    }
-
-    private func collect() {}
-
-    @objc private func toggleSounds(_ sender: NSSwitch) { draft.playSounds = sender.state == .on; save() }
-    @objc private func toggleBar(_ sender: NSSwitch) { draft.showBarAlways = sender.state == .on; save() }
-    @objc private func toggleDock(_ sender: NSSwitch) { draft.hideFromDock = sender.state == .on; save() }
-    @objc private func toggleLogin(_ sender: NSSwitch) { draft.startAtLogin = sender.state == .on; save() }
-    @objc private func togglePause(_ sender: NSSwitch) { draft.autoPauseAudio = sender.state == .on; save() }
-
-    @objc private func changeLanguage(_ sender: NSPopUpButton) {
-        draft.language = Config.languages[max(0, sender.indexOfSelectedItem)].0
-        save()
-    }
-
-    @objc private func changePunctuation(_ sender: NSPopUpButton) {
-        draft.punctuationMode = PunctuationMode.allCases[max(0, sender.indexOfSelectedItem)]
-        save()
-    }
-
-    @objc private func changeClipboard(_ sender: NSPopUpButton) {
-        draft.clipboardBehavior = ClipboardBehavior.allCases[max(0, sender.indexOfSelectedItem)]
-        save()
-    }
-
-    @objc private func changeHotkey(_ sender: NSPopUpButton) {
-        draft.hotkey = DictationHotkey.allCases[max(0, sender.indexOfSelectedItem)]
-        save()
-    }
-
-    @objc private func changeAppearance(_ sender: NSPopUpButton) {
-        draft.appearance = AppAppearance.allCases[max(0, sender.indexOfSelectedItem)]
-        save()
-    }
-
-    @objc private func changeMic(_ sender: NSPopUpButton) {
-        let ids = (sender.identifier?.rawValue ?? "").split(separator: "\u{1e}").map(String.init)
-        let index = sender.indexOfSelectedItem
-        draft.microphoneUID = index <= 0 ? "" : ids[safe: index - 1] ?? ""
-        save()
-    }
-
-    @objc private func openPermissions() {
-        PasteService.promptAccessibilityIfNeeded()
-        PasteService.openAccessibilitySettings()
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
-    @objc private func openVocabulary() {
+    private func openVocabulary() {
         let editor = ListEditorController(mode: .vocabulary, onAdd: { left, right in
-            if right.isEmpty {
-                VocabularyStore.shared.addTerm(left)
-            } else {
-                VocabularyStore.shared.learn(wrong: left, right: right)
-            }
+            if right.isEmpty { VocabularyStore.shared.addTerm(left) }
+            else { VocabularyStore.shared.learn(wrong: left, right: right) }
         }, onDelete: { id in
             VocabularyStore.shared.removeFix(id: id)
             VocabularyStore.shared.removeTerm(id: id)
         })
-        vocabEditor = editor
+        vocabularyEditor = editor
         editor.showWindow(nil)
         editor.window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
         editor.focusInput()
     }
 
-    @objc private func openSnippets() {
-        let editor = ListEditorController(mode: .snippets, onAdd: { left, right in
-            SnippetStore.shared.add(trigger: left, expansion: right)
-        }, onDelete: { id in
-            SnippetStore.shared.remove(id: id)
-        })
+    private func openSnippets() {
+        let editor = ListEditorController(mode: .snippets, onAdd: { SnippetStore.shared.add(trigger: $0, expansion: $1) },
+                                          onDelete: { SnippetStore.shared.remove(id: $0) })
         snippetEditor = editor
         editor.showWindow(nil)
         editor.window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
         editor.focusInput()
-    }
-
-    private func save() {
-        draft.save()
-        onApply?(draft)
     }
 }
 
-private extension Array {
-    subscript(safe index: Int) -> Element? {
-        indices.contains(index) ? self[index] : nil
+@MainActor
+private final class SettingsModel: ObservableObject {
+    @Published var config: Config
+    @Published var page = "General"
+    @Published var engineReady: Bool
+    @Published var engineError: String?
+    @Published var microphoneAllowed = false
+    @Published var accessibilityAllowed = false
+    @Published var devices: [AVCaptureDevice] = []
+    var onApply: ((Config) -> Void)?
+    var onVocabulary: (() -> Void)?
+    var onSnippets: (() -> Void)?
+
+    init(config: Config, engineReady: Bool, engineError: String?) {
+        self.config = config
+        self.engineReady = engineReady
+        self.engineError = engineError
+        refreshPermissions()
+    }
+    func refreshPermissions() {
+        microphoneAllowed = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        accessibilityAllowed = PasteService.isTrusted()
+        devices = AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone, .external], mediaType: .audio, position: .unspecified).devices
+    }
+    func requestMicrophone() {
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in
+                DispatchQueue.main.async { self?.refreshPermissions() }
+            }
+        } else {
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
+        }
+    }
+    func chooseModel() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a Whisper model"
+        panel.message = "Choose a whisper.cpp GGML model (.bin). Use a multilingual model for languages other than English."
+        panel.allowedContentTypes = [.data]
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url { config.modelPath = url.path }
+    }
+}
+
+private struct NativeSettingsView: View {
+    @ObservedObject var model: SettingsModel
+    private let permissionRefresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Form {
+            switch model.page {
+            case "Dictation": dictation
+            case "Privacy": privacy
+            default: general
+            }
+        }
+        .formStyle(.grouped)
+        .onChange(of: model.config) { _, next in model.onApply?(next) }
+        .onReceive(permissionRefresh) { _ in
+            if model.page == "Privacy" { model.refreshPermissions() }
+        }
+    }
+
+    @ViewBuilder private var general: some View {
+        Section {
+            Toggle("Show Lowkey in the Dock", isOn: Binding(get: { !model.config.hideFromDock }, set: { model.config.hideFromDock = !$0 }))
+            Toggle("Open at login", isOn: $model.config.startAtLogin)
+            Picker("Appearance", selection: $model.config.appearance) {
+                ForEach(AppAppearance.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+        } header: { Text("Application") }
+        Section {
+            Toggle("Keep the floating bar visible", isOn: $model.config.showBarAlways)
+            Toggle("Play recording sounds", isOn: $model.config.playSounds)
+            Toggle("Pause media while recording", isOn: $model.config.autoPauseAudio)
+        } header: { Text("Recording") } footer: {
+            Text("Hold your shortcut to talk, then release to transcribe. Or click the microphone to start and the voice bar to finish. Press Escape to cancel.")
+                .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
+        }
+        Section {
+            LabeledContent("Lowkey", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.1.0")
+            Label("Audio is transcribed on this Mac", systemImage: "lock.shield")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder private var dictation: some View {
+        Section("Input") {
+            Picker("Microphone", selection: $model.config.microphoneUID) {
+                Text("System default").tag("")
+                ForEach(model.devices, id: \.uniqueID) { Text($0.localizedName).tag($0.uniqueID) }
+                if !model.config.microphoneUID.isEmpty && !model.devices.contains(where: { $0.uniqueID == model.config.microphoneUID }) {
+                    Text("Selected microphone unavailable").tag(model.config.microphoneUID)
+                }
+            }
+            Picker("Hold to talk", selection: $model.config.hotkey) {
+                ForEach(DictationHotkey.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            LabeledContent("Cancel recording", value: "Escape")
+        }
+        Section {
+            Picker("Speech recognition", selection: $model.config.engine) {
+                ForEach(TranscriptionEngineKind.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            Picker("Language", selection: $model.config.language) {
+                ForEach(Config.languages, id: \.0) { Text($0.1).tag($0.0) }
+            }
+            HStack {
+                Text(model.engineReady ? "Ready to transcribe" : model.engineError ?? "Preparing speech recognition…")
+                    .foregroundStyle(model.engineReady ? Color.secondary : Color.orange)
+                Spacer()
+            }
+            HStack { Text("Whisper model"); Spacer(); Button("Choose…", action: model.chooseModel).accessibilityLabel("Choose Whisper model") }
+            Text((model.config.modelPath as NSString).lastPathComponent)
+                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+        } header: { Text("Transcription") } footer: {
+            Text("Parakeet uses an English-only model on Apple silicon. Whisper provides fallback recognition. Auto detect and other languages require a multilingual Whisper model.")
+                .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
+        }
+        Section("Text") {
+            Picker("Punctuation", selection: $model.config.punctuationMode) {
+                ForEach(PunctuationMode.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            Picker("Keep text on clipboard", selection: $model.config.clipboardBehavior) {
+                ForEach(ClipboardBehavior.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            HStack { Text("Custom vocabulary"); Spacer(); Button("Edit…") { model.onVocabulary?() }.accessibilityLabel("Edit custom vocabulary") }
+            HStack { Text("Spoken snippets"); Spacer(); Button("Edit…") { model.onSnippets?() }.accessibilityLabel("Edit spoken snippets") }
+        }
+    }
+
+    @ViewBuilder private var privacy: some View {
+        Section {
+            permission("Microphone", symbol: "mic", allowed: model.microphoneAllowed, action: model.requestMicrophone)
+            Text("Required to record your voice. Audio remains on your Mac.").font(.caption).foregroundStyle(.secondary)
+            permission("Accessibility", symbol: "accessibility", allowed: model.accessibilityAllowed) {
+                PasteService.promptAccessibilityIfNeeded()
+                PasteService.openAccessibilitySettings()
+            }
+            Text("Required to insert text into other apps. You can still copy transcripts without this permission.")
+                .font(.caption).foregroundStyle(.secondary)
+        } header: { Text("Permissions") }
+        Section {
+            Label("No account, analytics, or cloud transcription", systemImage: "lock.shield")
+            Text("Lowkey stores up to 80 recent transcripts and their audio locally. Deleting an entry removes its saved recording, while imported originals remain untouched.")
+                .foregroundStyle(.secondary)
+            Button("Show Local Data in Finder") { NSWorkspace.shared.open(Config.supportDirectory) }
+        } header: { Text("Local data") } footer: {
+            Text("Speech models download when needed. Recordings are never uploaded for transcription.")
+                .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func permission(_ name: String, symbol: String, allowed: Bool, action: @escaping () -> Void) -> some View {
+        HStack {
+            Label(name, systemImage: symbol)
+            Spacer()
+            Text(allowed ? "Allowed" : "Not allowed").foregroundStyle(allowed ? Color.secondary : Color.orange)
+            Button(allowed ? "Manage…" : "Enable…", action: action)
+                .accessibilityLabel(allowed ? "Manage \(name) access" : "Enable \(name) access")
+        }
+        .accessibilityElement(children: .contain)
     }
 }

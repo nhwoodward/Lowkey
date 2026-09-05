@@ -27,6 +27,7 @@ let package = Package(
                 .linkedFramework("ServiceManagement"),
             ]
         ),
+        .testTarget(name: "LowkeyTests", dependencies: ["Lowkey"]),
     ],
     swiftLanguageModes: [.v5]
 )

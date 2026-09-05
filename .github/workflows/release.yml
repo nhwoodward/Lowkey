@@ -9,7 +9,7 @@ on:
       version:
         description: "Release version (for example 1.0.0)"
         required: true
-        default: "1.0.0"
+        default: "2.1.0"
         type: string
 
 permissions:
@@ -24,6 +24,8 @@ jobs:
   build:
     name: Build ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     strategy:
       fail-fast: false
       matrix:

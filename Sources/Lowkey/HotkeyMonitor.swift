@@ -30,8 +30,21 @@ final class HotkeyMonitor {
     }
 
     private func handle(_ event: NSEvent) {
-        let isTargetKey = event.keyCode == hotkey.keyCode
-        let flagDown = event.modifierFlags.contains(hotkey.requiredFlag)
+        handle(keyCode: event.keyCode, flags: event.modifierFlags)
+    }
+
+    func handle(keyCode: UInt16, flags: NSEvent.ModifierFlags) {
+        let isTargetKey = keyCode == hotkey.keyCode
+        // Device-dependent flags distinguish the two Command/Option keys.
+        // The aggregate Command flag stays set when only the other side is held.
+        let mask: UInt
+        switch hotkey {
+        case .rightCommand: mask = 0x10
+        case .leftCommand: mask = 0x08
+        case .rightOption: mask = 0x40
+        case .function: mask = NSEvent.ModifierFlags.function.rawValue
+        }
+        let flagDown = flags.rawValue & mask != 0
         if isTargetKey && flagDown && !holding {
             holding = true
             onHoldStart?()

@@ -13,7 +13,11 @@ final class Recorder {
     private(set) var containsSpeech = false
     private(set) var heardEnergy = false
     private(set) var fileURL: URL?
-    fileprivate var running = false
+    private var isCapturing = false
+    fileprivate var running: Bool {
+        get { pcmLock.withLock { isCapturing } }
+        set { pcmLock.withLock { isCapturing = newValue } }
+    }
 
     func start(deviceUID: String? = nil) throws {
         stopCapture()
@@ -23,7 +27,7 @@ final class Recorder {
         containsSpeech = false
         heardEnergy = false
         wave = Array(repeating: 0, count: 18)
-        let url = Config.tmpDirectory.appendingPathComponent("clip.wav")
+        let url = Config.tmpDirectory.appendingPathComponent(UUID().uuidString + ".wav")
         try? FileManager.default.removeItem(at: url)
         fileURL = url
         try startQueue(deviceUID: deviceUID)
@@ -83,9 +87,9 @@ final class Recorder {
         queue = newQueue
         if let deviceUID, !deviceUID.isEmpty {
             var uid: CFString = deviceUID as CFString
-            withUnsafePointer(to: &uid) { pointer in
+            let deviceStatus = withUnsafePointer(to: &uid) { pointer in
                 pointer.withMemoryRebound(to: UInt8.self, capacity: MemoryLayout<CFString>.size) { _ in
-                    _ = AudioQueueSetProperty(
+                    AudioQueueSetProperty(
                         newQueue,
                         kAudioQueueProperty_CurrentDevice,
                         pointer,
@@ -93,12 +97,14 @@ final class Recorder {
                     )
                 }
             }
+            guard deviceStatus == noErr else { stopCapture(); throw RecorderError.failedToStart }
         }
 
         let bufferBytes: UInt32 = 2048
         for _ in 0..<3 {
             var buffer: AudioQueueBufferRef?
             guard AudioQueueAllocateBuffer(newQueue, bufferBytes, &buffer) == noErr, let buffer else {
+                stopCapture()
                 throw RecorderError.failedToStart
             }
             AudioQueueEnqueueBuffer(newQueue, buffer, 0, nil)

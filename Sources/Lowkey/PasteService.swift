@@ -30,6 +30,7 @@ struct PasteTarget {
 
 enum PasteService {
     private static let logURL = Config.logsDirectory.appendingPathComponent("paste.log")
+    private static let deliveryQueue = DispatchQueue(label: "app.lowkey.paste", qos: .userInitiated)
     private static let prePasteDelay: TimeInterval = 0.10
     private static let keyGap: useconds_t = 10_000
 
@@ -59,37 +60,24 @@ enum PasteService {
             return
         }
 
-        DispatchQueue.global(qos: .userInitiated).async {
+        deliveryQueue.async {
             let destination = target ?? DispatchQueue.main.sync { PasteTarget.capture() }
             log("insert len=\(text.count) app=\(destination.localizedName) pane=\(destination.weztermPaneID ?? "-") trusted=\(isTrusted()) clipboard=\(clipboard.rawValue)")
 
             // Always park the transcript on the clipboard first.
             let previous = DispatchQueue.main.sync { writeClipboard(text) }
 
+            guard destination.pid > 0, destination.pid != getpid() else {
+                finishOnMain(previous, clipboard: clipboard, expected: text, outcome: .failed, completion: completion)
+                return
+            }
             if destination.isWezTerm {
                 let routing = weztermRouting()
-                let pane: String?
-                if let capturedPane = destination.weztermPaneID,
-                   let routing,
-                   destination.weztermSocket == routing.socket {
-                    pane = capturedPane
-                } else {
-                    pane = routing.flatMap { focusedWeztermPane(using: $0) }
-                }
-
-                if let routing, sendViaWezterm(text, pane: pane, routing: routing) {
-                    log("wezterm send-text pane=\(pane ?? "active")")
-                    finishOnMain(previous, clipboard: clipboard, expected: text, outcome: .unknown, completion: completion)
-                    return
-                }
-
-                if let routing,
-                   let refreshed = weztermRouting(),
-                   refreshed.socket != routing.socket,
-                   let refreshedPane = focusedWeztermPane(using: refreshed),
-                   sendViaWezterm(text, pane: refreshedPane, routing: refreshed) {
-                    log("wezterm send-text pane=\(refreshedPane)")
-                    finishOnMain(previous, clipboard: clipboard, expected: text, outcome: .unknown, completion: completion)
+                if let routing, let pane = destination.weztermPaneID,
+                   destination.weztermSocket == routing.socket,
+                   sendViaWezterm(text, pane: pane, routing: routing) {
+                    log("wezterm send-text pane=\(pane)")
+                    finishOnMain(previous, clipboard: clipboard, expected: text, outcome: .succeeded, completion: completion)
                     return
                 }
                 log("wezterm send-text failed, falling through to keystroke")
@@ -103,24 +91,33 @@ enum PasteService {
             // 6-7s freezes when this ran under DispatchQueue.main.sync: the AX
             // round trip to WezTerm hit its 6s default timeout while the main
             // thread sat blocked.
+            guard destinationStillFocused(destination) else {
+                log("destination changed; preserving transcript without typing")
+                finishOnMain(previous, clipboard: clipboard, expected: text, outcome: .failed, completion: completion)
+                return
+            }
             let focus = FocusedField.probe()
 
             // PASTE CONTRACT: never skip the keystroke because a probe
             // failed. AX lies for WezTerm, Zen, Notes, and Chromium.
             // Clipboard is already filled. Worst case the user Cmd+V.
-            var outcome = PasteOutcome.unknown
+            var outcome = PasteOutcome.failed
             if isTrusted() {
-                DispatchQueue.main.sync { pasteFromClipboardVoiceInk() }
-                log("voiceink hid tap posted")
-                outcome = detectKeystrokeOutcome(before: focus.value, text: text)
-            } else {
-                let scriptOK = DispatchQueue.main.sync { pasteUsingAppleScript() }
-                log("applescript=\(scriptOK) trusted=false")
-                outcome = scriptOK ? detectKeystrokeOutcome(before: focus.value, text: text) : .unknown
+                let sent = DispatchQueue.main.sync { () -> Bool in
+                    guard destinationStillFocused(destination),
+                          NSPasteboard.general.changeCount == previous.writtenChangeCount else { return false }
+                    pasteFromClipboardVoiceInk()
+                    return true
+                }
+                if sent { outcome = detectKeystrokeOutcome(before: focus.value, text: text) }
             }
 
             finishOnMain(previous, clipboard: clipboard, expected: text, outcome: outcome, completion: completion)
         }
+    }
+
+    private static func destinationStillFocused(_ target: PasteTarget) -> Bool {
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid
     }
 
     enum PasteOutcome: String {
@@ -149,12 +146,11 @@ enum PasteService {
             return .unknown
         }
         if value.contains(text) { return .succeeded }
-        if let before, value.count > before.count { return .succeeded }
         return .failed
     }
 
     private static func finishOnMain(
-        _ previous: String?,
+        _ previous: ClipboardSnapshot,
         clipboard: ClipboardBehavior,
         expected: String,
         outcome: PasteOutcome,
@@ -240,40 +236,49 @@ enum PasteService {
         return try? JSONSerialization.jsonObject(with: result.stdout)
     }
 
+    struct ClipboardSnapshot {
+        let items: [[NSPasteboard.PasteboardType: Data]]
+        let writtenChangeCount: Int
+    }
+
     @discardableResult
-    private static func writeClipboard(_ text: String) -> String? {
-        let board = NSPasteboard.general
-        let previous = board.string(forType: .string)
+    static func writeClipboard(_ text: String, board: NSPasteboard = .general) -> ClipboardSnapshot {
+        let saved = (board.pasteboardItems ?? []).map { item in
+            Dictionary(uniqueKeysWithValues: item.types.compactMap { type in item.data(forType: type).map { (type, $0) } })
+        }
         let transient = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
         let concealed = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
         let autoGenerated = NSPasteboard.PasteboardType("org.nspasteboard.AutoGeneratedType")
         board.declareTypes([.string, transient, concealed, autoGenerated], owner: nil)
         board.setString(text, forType: .string)
-        board.setString("", forType: transient)
-        board.setString("", forType: concealed)
-        board.setString("", forType: autoGenerated)
-        return previous
+        for type in [transient, concealed, autoGenerated] { board.setString("", forType: type) }
+        return ClipboardSnapshot(items: saved, writtenChangeCount: board.changeCount)
+    }
+
+    static func restoreClipboard(_ saved: ClipboardSnapshot, board: NSPasteboard = .general) {
+        guard board.changeCount == saved.writtenChangeCount else { return }
+        board.clearContents()
+        let items = saved.items.map { representations -> NSPasteboardItem in
+            let item = NSPasteboardItem()
+            for (type, data) in representations { item.setData(data, forType: type) }
+            return item
+        }
+        if !items.isEmpty { board.writeObjects(items) }
     }
 
     private static func finishRestore(
-        _ previous: String?,
+        _ previous: ClipboardSnapshot,
         enabled: Bool,
         expected: String,
         completion: ((PasteOutcome) -> Void)?,
         outcome: PasteOutcome
     ) {
-        if enabled, let previous {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                let board = NSPasteboard.general
-                if board.string(forType: .string) == expected {
-                    board.clearContents()
-                    board.setString(previous, forType: .string)
-                }
+        if enabled {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                restoreClipboard(previous)
                 completion?(outcome)
             }
-        } else {
-            completion?(outcome)
-        }
+        } else { completion?(outcome) }
     }
 
     private static func waitForModifiersToClear() {
@@ -285,18 +290,6 @@ enum PasteService {
             if ns.isEmpty && cg.isEmpty { return }
             Thread.sleep(forTimeInterval: 0.025)
         }
-    }
-
-    @discardableResult
-    private static func pasteUsingAppleScript() -> Bool {
-        let source = "tell application \"System Events\" to key code 9 using command down"
-        var error: NSDictionary?
-        NSAppleScript(source: source)?.executeAndReturnError(&error)
-        if let error {
-            log("applescript error=\(error)")
-            return false
-        }
-        return true
     }
 
     private static func pasteFromClipboardVoiceInk() {
@@ -470,34 +463,66 @@ enum TimedProcess {
         let input = Pipe()
         process.standardOutput = out
         process.standardError = FileHandle.nullDevice
-        if stdin != nil {
-            process.standardInput = input
-        }
+        process.standardInput = stdin == nil ? FileHandle.nullDevice : input
         do {
             try process.run()
         } catch {
             return Result(status: -1, stdout: Data())
         }
-        if let stdin {
-            try? input.fileHandleForWriting.write(contentsOf: stdin)
-            try? input.fileHandleForWriting.close()
-        }
+        try? out.fileHandleForWriting.close()
+        defer { try? out.fileHandleForReading.close(); try? input.fileHandleForWriting.close() }
+        let readFD = out.fileHandleForReading.fileDescriptor
+        let writeFD = input.fileHandleForWriting.fileDescriptor
+        _ = fcntl(readFD, F_SETFL, O_NONBLOCK)
+        _ = fcntl(writeFD, F_SETFL, O_NONBLOCK)
+        _ = fcntl(writeFD, F_SETNOSIGPIPE, 1)
+        var offset = 0
+        var inputClosed = stdin == nil
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 16384)
         let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning, Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.03)
+        var timedOut = false
+        while true {
+            // Drain while the child runs. Waiting for termination first can
+            // deadlock any CLI that fills its stdout pipe.
+            while Date() < deadline {
+                let count = Darwin.read(readFD, &buffer, buffer.count)
+                guard count > 0 else { break }
+                data.append(contentsOf: buffer.prefix(count))
+                if data.count > 8 * 1024 * 1024 { timedOut = true; break }
+            }
+            if !process.isRunning { break }
+            if Date() >= deadline || timedOut { timedOut = true; break }
+            if let stdin, !inputClosed {
+                if offset < stdin.count {
+                    let written = stdin.withUnsafeBytes { bytes in
+                        Darwin.write(writeFD, bytes.baseAddress!.advanced(by: offset), min(16384, stdin.count - offset))
+                    }
+                    if written > 0 { offset += written }
+                    else if written < 0, errno != EAGAIN && errno != EINTR {
+                        try? input.fileHandleForWriting.close()
+                        inputClosed = true
+                    }
+                }
+                if offset == stdin.count {
+                    try? input.fileHandleForWriting.close()
+                    inputClosed = true
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.01)
         }
-        if process.isRunning {
+        if timedOut {
             process.terminate()
             let killDeadline = Date().addingTimeInterval(0.3)
-            while process.isRunning, Date() < killDeadline {
-                Thread.sleep(forTimeInterval: 0.03)
-            }
-            if process.isRunning {
-                kill(process.processIdentifier, SIGKILL)
-            }
+            while process.isRunning, Date() < killDeadline { Thread.sleep(forTimeInterval: 0.01) }
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
             return Result(status: -1, stdout: Data())
         }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
+        while data.count <= 8 * 1024 * 1024 {
+            let count = Darwin.read(readFD, &buffer, buffer.count)
+            guard count > 0 else { break }
+            data.append(contentsOf: buffer.prefix(count))
+        }
         return Result(status: process.terminationStatus, stdout: data)
     }
 }

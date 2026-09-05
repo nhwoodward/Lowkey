@@ -1,0 +1,10 @@
+version = 1
+name = "Lowkey"
+
+[setup]
+script = ""
+
+[[actions]]
+name = "Run Development App"
+icon = "run"
+command = "./script/build_and_run.sh"
