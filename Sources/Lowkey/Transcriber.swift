@@ -29,7 +29,7 @@ enum Transcriber {
     static func warmUp(config: Config) {
         // Parakeet stays resident on the Neural Engine; only the whisper
         // HTTP path benefits from pre-heating.
-        if config.prefersParakeet, ParakeetEngine.shared.ready { return }
+        guard config.engine == .whisper else { return }
         touchLock.lock()
         let recent = Date().timeIntervalSince(lastEngineTouch) < 20
         if !recent { lastEngineTouch = Date() }
@@ -76,6 +76,7 @@ enum Transcriber {
     }
 
     static func transcribe(fileURL: URL, config: Config) throws -> TranscriptOutcome {
+        if let error = config.selectedEngineError { throw error }
         defer { touchEngine() }
         let started = Date()
         let audio = try Data(contentsOf: fileURL)
@@ -86,21 +87,16 @@ enum Transcriber {
             throw TranscriberError.tooLarge
         }
 
-        // Primary path: Parakeet on the Neural Engine. Any failure falls
-        // through to whisper below, whose own recovery can respawn the
-        // server on demand.
-        if config.prefersParakeet, ParakeetEngine.shared.ready {
-            do {
-                let raw = try ParakeetEngine.shared.transcribe(fileURL: fileURL)
-                let outcome = finish(raw, config: config)
-                let elapsed = Date().timeIntervalSince(started)
-                AppLog.line(String(
-                    format: "transcribe ok=%.2fs bytes=%d outcome=%@ engine=parakeet",
-                    elapsed, audio.count, describe(outcome)))
-                return outcome
-            } catch {
-                AppLog.line("parakeet transcribe failed, falling back to whisper: \(error.localizedDescription)")
-            }
+        if config.engine == .parakeet {
+            // FluidAudio requires at least 300 ms of 16 kHz PCM. A short tap
+            // must not become an engine failure or wake another recognizer.
+            guard audio.count >= 9644 else { return .silence }
+            let raw = try ParakeetEngine.shared.transcribe(fileURL: fileURL)
+            let outcome = finish(raw, config: config)
+            AppLog.line(String(
+                format: "transcribe ok=%.2fs bytes=%d outcome=%@ engine=parakeet",
+                Date().timeIntervalSince(started), audio.count, describe(outcome)))
+            return outcome
         }
 
         let boundary = "Boundary-\(UUID().uuidString)"

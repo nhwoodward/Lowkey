@@ -18,6 +18,7 @@ if [ -f "$ROOT/Resources/AppIcon.icns" ]; then
     cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 fi
 chmod +x "$APP/Contents/MacOS/Lowkey"
+"$ROOT/Scripts/stamp-sdk.sh" "$APP/Contents/MacOS/Lowkey"
 
 # Prefer a paid Developer ID if one exists. Otherwise keep the stable
 # "Lowkey Local" identity so TCC (mic / Accessibility) does not reset.

@@ -49,15 +49,55 @@ enum ClipboardBehavior: String, Codable, CaseIterable {
 }
 
 enum TranscriptionEngineKind: String, Codable, CaseIterable {
-    // Parakeet is the primary English engine on Apple silicon. Whisper is
-    // the fallback and the choice for non-English dictation.
+    // Selection is exclusive. Neither engine starts the other as a fallback.
     case parakeet
     case whisper
+
+    static var platformDefault: Self {
+        #if arch(x86_64)
+        return .whisper
+        #else
+        return .parakeet
+        #endif
+    }
 
     var title: String {
         switch self {
         case .parakeet: return "Parakeet (Neural Engine)"
         case .whisper: return "Whisper (GPU)"
+        }
+    }
+}
+
+enum SelectedEngineError: LocalizedError {
+    case parakeetNeedsAppleSilicon
+    case parakeetNeedsEnglish
+
+    var errorDescription: String? {
+        switch self {
+        case .parakeetNeedsAppleSilicon:
+            return "Parakeet needs a Mac with Apple silicon. Choose Whisper instead."
+        case .parakeetNeedsEnglish:
+            return "Parakeet supports English only. Choose English, or Whisper for other languages."
+        }
+    }
+}
+
+// What the selected engine is doing, as every surface should describe it.
+enum EngineStatus: Equatable {
+    case preparing
+    // First run only. The model library restarts its fraction for every
+    // file, so there is no honest overall percentage to show.
+    case downloading
+    case ready
+    case failed(String)
+
+    var summary: String {
+        switch self {
+        case .preparing: return "Loading speech model…"
+        case .downloading: return "Downloading speech model…"
+        case .ready: return "Ready"
+        case .failed(let message): return message
         }
     }
 }
@@ -92,7 +132,6 @@ struct Config: Codable, Equatable {
     var microphoneUID: String
     var clipboardBehavior: ClipboardBehavior
     var punctuationMode: PunctuationMode
-    var appearance: AppAppearance
 
     static let languages: [(String, String)] = [
         ("en", "English"),
@@ -222,7 +261,7 @@ struct Config: Codable, Equatable {
     }
 
     init(
-        engine: TranscriptionEngineKind = .parakeet,
+        engine: TranscriptionEngineKind = .platformDefault,
         modelPath: String,
         whisperServerPath: String,
         host: String,
@@ -238,8 +277,7 @@ struct Config: Codable, Equatable {
         autoPauseAudio: Bool,
         microphoneUID: String,
         clipboardBehavior: ClipboardBehavior,
-        punctuationMode: PunctuationMode,
-        appearance: AppAppearance
+        punctuationMode: PunctuationMode
     ) {
         self.engine = engine
         self.modelPath = modelPath
@@ -258,7 +296,6 @@ struct Config: Codable, Equatable {
         self.microphoneUID = microphoneUID
         self.clipboardBehavior = clipboardBehavior
         self.punctuationMode = punctuationMode
-        self.appearance = appearance
     }
 
     static func makeDefault() -> Config {
@@ -278,8 +315,7 @@ struct Config: Codable, Equatable {
             autoPauseAudio: false,
             microphoneUID: "",
             clipboardBehavior: .ifPasteFails,
-            punctuationMode: .automatic,
-            appearance: .system
+            punctuationMode: .automatic
         )
     }
 
@@ -309,16 +345,19 @@ struct Config: Codable, Equatable {
             clipboardBehavior = fallback.clipboardBehavior
         }
         punctuationMode = try c.decodeIfPresent(PunctuationMode.self, forKey: .punctuationMode) ?? fallback.punctuationMode
-        appearance = try c.decodeIfPresent(AppAppearance.self, forKey: .appearance) ?? fallback.appearance
     }
 
-    // English uses an English-only vocabulary. Automatic language detection
-    // belongs to the multilingual Whisper path, not the English recognizer.
-    var prefersParakeet: Bool { engine == .parakeet && language == "en" }
+    var selectedEngineError: SelectedEngineError? {
+        guard engine == .parakeet else { return nil }
+        #if arch(x86_64)
+        return .parakeetNeedsAppleSilicon
+        #else
+        return language == "en" ? nil : .parakeetNeedsEnglish
+        #endif
+    }
 
     var whisperConfig: Config {
         var next = self
-        next.engine = .whisper
         if language != "en", (modelPath as NSString).lastPathComponent.contains(".en") {
             let directory = URL(fileURLWithPath: modelPath).deletingLastPathComponent()
             for name in ["ggml-small-q5_1.bin", "ggml-small.bin", "ggml-base.bin"] {

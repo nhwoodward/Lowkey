@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 struct VocabularyTerm: Codable, Equatable, Identifiable {
@@ -12,22 +13,37 @@ struct SpellingFix: Codable, Equatable, Identifiable {
     var count: Int
 }
 
-final class VocabularyStore {
-    static let shared = VocabularyStore()
-    private(set) var terms: [VocabularyTerm] = []
-    private(set) var fixes: [SpellingFix] = []
-    var onChange: (() -> Void)?
+// One row of the Settings vocabulary table: a fix, or a spelling no fix writes.
+struct VocabularyEntry: Equatable, Identifiable {
+    var id: UUID
+    var heard: String
+    var writeAs: String
+}
 
-    private var fileURL: URL {
-        Config.supportDirectory.appendingPathComponent("vocabulary.json")
-    }
+final class VocabularyStore: ObservableObject {
+    static let shared = VocabularyStore()
+    @Published private(set) var terms: [VocabularyTerm] = []
+    @Published private(set) var fixes: [SpellingFix] = []
+
+    private let fileURL: URL
 
     private struct Snapshot: Codable {
         var terms: [VocabularyTerm]
         var fixes: [SpellingFix]
     }
 
-    private init() { load() }
+    init(directory: URL = Config.supportDirectory) {
+        fileURL = directory.appendingPathComponent("vocabulary.json")
+        load()
+    }
+
+    var entries: [VocabularyEntry] {
+        let standalone = terms.filter { term in
+            !fixes.contains { $0.right.caseInsensitiveCompare(term.phrase) == .orderedSame }
+        }
+        return fixes.map { VocabularyEntry(id: $0.id, heard: $0.wrong, writeAs: $0.right) }
+            + standalone.map { VocabularyEntry(id: $0.id, heard: $0.phrase, writeAs: "") }
+    }
 
     var promptHint: String {
         let names = terms.map(\.phrase).filter { !$0.isEmpty }.prefix(24)
@@ -73,6 +89,40 @@ final class VocabularyStore {
         persist()
     }
 
+    // An explicit Settings entry. Unlike learn, a case-only replacement is
+    // deliberate here ("github" -> "GitHub"), and re-adding a phrase replaces
+    // its row instead of leaving the old spelling behind.
+    func add(heard: String, writeAs: String) {
+        let from = heard.trimmingCharacters(in: .whitespacesAndNewlines)
+        let to = writeAs.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !from.isEmpty else { return }
+        guard !to.isEmpty, to != from else { return addTerm(from) }
+        if let existing = fixes.first(where: { $0.wrong.caseInsensitiveCompare(from) == .orderedSame }) {
+            removeEntry(id: existing.id)
+        }
+        fixes.append(SpellingFix(id: UUID(), wrong: from, right: to, count: 1))
+        // The heard form is no longer a spelling to prefer.
+        terms.removeAll {
+            $0.phrase.caseInsensitiveCompare(from) == .orderedSame || $0.phrase.caseInsensitiveCompare(to) == .orderedSame
+        }
+        terms.append(VocabularyTerm(id: UUID(), phrase: to))
+        persist()
+    }
+
+    // A fix row owns the spelling it writes, so that term goes with it unless
+    // another fix still writes it.
+    func removeEntry(id: UUID) {
+        if let fix = fixes.first(where: { $0.id == id }) {
+            fixes.removeAll { $0.id == id }
+            if !fixes.contains(where: { $0.right.caseInsensitiveCompare(fix.right) == .orderedSame }) {
+                terms.removeAll { $0.phrase.caseInsensitiveCompare(fix.right) == .orderedSame }
+            }
+        } else {
+            terms.removeAll { $0.id == id }
+        }
+        persist()
+    }
+
     func apply(to text: String) -> String {
         var result = text
         let ordered = fixes.sorted { $0.wrong.count > $1.wrong.count }
@@ -110,6 +160,5 @@ final class VocabularyStore {
         if let data = try? JSONEncoder().encode(snapshot) {
             try? data.write(to: fileURL, options: .atomic)
         }
-        DispatchQueue.main.async { self.onChange?() }
     }
 }

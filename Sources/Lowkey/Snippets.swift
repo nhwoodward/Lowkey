@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 struct DictationSnippet: Codable, Equatable, Identifiable {
@@ -6,16 +7,16 @@ struct DictationSnippet: Codable, Equatable, Identifiable {
     var expansion: String
 }
 
-final class SnippetStore {
+final class SnippetStore: ObservableObject {
     static let shared = SnippetStore()
-    private(set) var items: [DictationSnippet] = []
-    var onChange: (() -> Void)?
+    @Published private(set) var items: [DictationSnippet] = []
 
-    private var fileURL: URL {
-        Config.supportDirectory.appendingPathComponent("snippets.json")
+    private let fileURL: URL
+
+    init(directory: URL = Config.supportDirectory) {
+        fileURL = directory.appendingPathComponent("snippets.json")
+        load()
     }
-
-    private init() { load() }
 
     func add(trigger: String, expansion: String) {
         let key = trigger.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -67,6 +68,5 @@ final class SnippetStore {
         if let data = try? JSONEncoder().encode(items) {
             try? data.write(to: fileURL, options: .atomic)
         }
-        DispatchQueue.main.async { self.onChange?() }
     }
 }

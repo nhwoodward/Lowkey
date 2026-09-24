@@ -2,6 +2,8 @@ import AppKit
 
 enum FlowBarMode: Equatable {
     case hidden, idle, listening, working, success
+    // Neutral information, such as text waiting on the clipboard.
+    case notice(String, symbol: String)
     case failed(String)
 }
 
@@ -16,19 +18,24 @@ final class FlowBarController {
     private let chrome = FlowBarContent()
     private var glass: NSView?
     private var dismissWork: DispatchWorkItem?
+    private var messageAction: (() -> Void)?
     private var timer: Timer?
     private var levels = Array(repeating: CGFloat.zero, count: 18)
     private var incoming = Array(repeating: CGFloat.zero, count: 18)
+    private var lastWaveTime: CFTimeInterval = 0
     private var screen: NSScreen?
     private var generation = 0
     private var reducedMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
 
-    func setMode(_ next: FlowBarMode) {
+    // Clicking a notice or failure runs `action`, if any, and dismisses it.
+    func setMode(_ next: FlowBarMode, action: (() -> Void)? = nil) {
         generation += 1
         dismissWork?.cancel()
         dismissWork = nil
+        messageAction = action
         let previous = mode
         mode = next
+        if next != .listening { chrome.setListeningAccessory(handsFree: false, remaining: nil) }
         if next == .hidden {
             chrome.apply(.hidden)
             stopTimer()
@@ -46,9 +53,25 @@ final class FlowBarController {
         panel?.orderFrontRegardless()
         switch next {
         case .success: rest(after: 1.0)
+        case .notice: rest(after: 4)
         case .failed: rest(after: 6)
         default: break
         }
+    }
+
+    // Hands-free shows a stop control; the final seconds before the length
+    // limit replace it with a countdown.
+    func setListeningAccessory(handsFree: Bool, remaining: Int?) {
+        guard mode == .listening else { return }
+        let before = chrome.preferredSize
+        chrome.setListeningAccessory(handsFree: handsFree, remaining: remaining)
+        if chrome.preferredSize != before { updateFrame(animated: true) }
+    }
+
+    private func messageClicked() {
+        let action = messageAction
+        setMode(restingMode)
+        action?()
     }
 
     private func updateFrame(animated: Bool) {
@@ -59,7 +82,7 @@ final class FlowBarController {
             panel?.setFrame(rect, display: true)
         } else {
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.32
+                context.duration = 0.18
                 context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1)
                 panel?.animator().setFrame(rect, display: true)
             }
@@ -100,10 +123,18 @@ final class FlowBarController {
 
     private func startTimer() {
         guard timer == nil else { return }
-        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+        lastWaveTime = CACurrentMediaTime()
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
             guard let self, self.mode == .listening else { return }
+            let now = CACurrentMediaTime()
+            let elapsed = now - self.lastWaveTime
+            self.lastWaveTime = now
             for i in self.levels.indices {
-                self.levels[i] += (self.incoming[i] - self.levels[i]) * (self.incoming[i] > self.levels[i] ? 0.65 : 0.3)
+                // Fast attack, gentle release. Use elapsed time so delayed frames
+                // catch up instead of adding another frame's worth of lag.
+                let response = self.incoming[i] > self.levels[i] ? 0.012 : 0.060
+                let blend = CGFloat(1 - exp(-elapsed / response))
+                self.levels[i] += (self.incoming[i] - self.levels[i]) * blend
             }
             self.chrome.waveform.bars = self.levels
         }
@@ -125,6 +156,7 @@ final class FlowBarController {
         panel.setAccessibilityLabel("Lowkey dictation")
         chrome.onStart = { [weak self] in self?.onIdleTap?() }
         chrome.onStop = { [weak self] in self?.onStop?() }
+        chrome.onMessageClick = { [weak self] in self?.messageClicked() }
         // Leave enough transparent space for the system's optical edge.
         let root = NSView()
         let material: NSView
@@ -132,7 +164,7 @@ final class FlowBarController {
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView()
             glass.style = .regular
-            glass.cornerRadius = 24
+            glass.cornerRadius = FlowBarContent.height / 2
             glass.contentView = chrome
             material = glass
         } else {
@@ -160,7 +192,7 @@ final class FlowBarController {
         effect.blendingMode = .behindWindow
         effect.state = .active
         effect.wantsLayer = true
-        effect.layer?.cornerRadius = 24
+        effect.layer?.cornerRadius = FlowBarContent.height / 2
         effect.layer?.masksToBounds = true
         chrome.translatesAutoresizingMaskIntoConstraints = false
         effect.addSubview(chrome)
@@ -181,27 +213,37 @@ final class FlowBarController {
 }
 
 final class FlowBarContent: NSView {
-    static let height: CGFloat = 48
-    private static let padding: CGFloat = 18
+    static let height: CGFloat = 36
+    private static let padding: CGFloat = 14
     private static let indicatorSize: CGFloat = 16
     private static let spacing: CGFloat = 8
     private static let maximumWidth: CGFloat = 480
+    private static let listeningWidth: CGFloat = 132
     var onStart: (() -> Void)?
     var onStop: (() -> Void)?
+    var onMessageClick: (() -> Void)?
     fileprivate let waveform = WaveformView()
     let label = NSTextField(labelWithString: "")
     private let start = NSButton()
     private let recordingSurface = NSButton()
+    private let messageSurface = NSButton()
     private let status = NSImageView()
     private let progress = ProgressGlyphView()
+    private let stopGlyph = NSImageView()
+    private let countdown = NSTextField(labelWithString: "")
     private var mode: FlowBarMode = .idle
+    private var handsFree = false
+    private var remaining: Int?
+
+    private var showsListeningAccessory: Bool { handsFree || remaining != nil }
 
     var preferredSize: NSSize {
         let width: CGFloat
         switch mode {
         case .hidden, .idle, .success: width = Self.height
-        case .listening: width = 152
-        case .working, .failed:
+        case .listening:
+            width = Self.listeningWidth + (showsListeningAccessory ? Self.indicatorSize + Self.spacing : 0)
+        case .working, .notice, .failed:
             width = label.isHidden ? Self.height : 2 * Self.padding + Self.indicatorSize + Self.spacing + ceil(label.cell?.cellSize.width ?? 0)
         }
         return NSSize(width: width, height: Self.height)
@@ -213,6 +255,8 @@ final class FlowBarContent: NSView {
         start.imagePosition = .imageOnly
         start.bezelStyle = .circular
         start.isBordered = false
+        start.imageScaling = .scaleNone
+        start.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
         start.target = self
         start.action = #selector(startAction)
         start.toolTip = "Start dictation"
@@ -224,7 +268,13 @@ final class FlowBarContent: NSView {
         label.cell?.wraps = false
         label.cell?.usesSingleLineMode = true
         label.lineBreakMode = .byClipping
-        for view in [waveform, label, status, progress] {
+        stopGlyph.image = NSImage(systemSymbolName: "stop.circle.fill", accessibilityDescription: nil)
+        stopGlyph.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+        stopGlyph.contentTintColor = .labelColor
+        countdown.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        countdown.textColor = .systemOrange
+        countdown.alignment = .center
+        for view in [waveform, label, status, progress, stopGlyph, countdown] {
             view.wantsLayer = true
             addSubview(view)
         }
@@ -237,17 +287,40 @@ final class FlowBarContent: NSView {
         recordingSurface.setAccessibilityLabel("Finish dictation")
         recordingSurface.setAccessibilityHelp("Click the voice bar to finish. Press Escape to cancel.")
         addSubview(recordingSurface)
+        messageSurface.title = ""
+        messageSurface.isBordered = false
+        messageSurface.target = self
+        messageSurface.action = #selector(messageAction)
+        addSubview(messageSurface)
         setAccessibilityRole(.group)
     }
 
     required init?(coder: NSCoder) { nil }
     @objc private func startAction() { onStart?() }
     @objc private func stopAction() { onStop?() }
+    @objc private func messageAction() { onMessageClick?() }
+
+    func setListeningAccessory(handsFree: Bool, remaining: Int?) {
+        self.handsFree = handsFree
+        self.remaining = remaining
+        guard mode == .listening else { return }
+        stopGlyph.isHidden = !handsFree || remaining != nil
+        countdown.isHidden = remaining == nil
+        countdown.stringValue = remaining.map(String.init) ?? ""
+        let listening = handsFree ? "Listening hands-free" : "Listening"
+        setAccessibilityLabel(remaining.map { "\(listening), \($0) seconds left" } ?? listening)
+        recordingSurface.setAccessibilityHelp(remaining.map { "\($0) seconds left. Click the voice bar to finish." }
+            ?? "Click the voice bar to finish. Press Escape to cancel.")
+        needsLayout = true
+    }
 
     func apply(_ mode: FlowBarMode, animated: Bool = false) {
         let previous = self.mode
         self.mode = mode
         for view in subviews {
+            // Completion can arrive during the spinner's entrance. Keep its
+            // visibility and opacity continuous while the ring becomes a check.
+            if view === progress, previous == .working, mode == .success { continue }
             view.layer?.removeAllAnimations()
             view.alphaValue = 1
             view.isHidden = true
@@ -262,7 +335,7 @@ final class FlowBarContent: NSView {
         case .listening:
             waveform.isHidden = false
             recordingSurface.isHidden = false
-            setAccessibilityLabel("Listening")
+            setListeningAccessory(handsFree: handsFree, remaining: remaining)
             if animated { fadeIn(waveform) }
         case .working:
             progress.isHidden = false
@@ -275,32 +348,42 @@ final class FlowBarContent: NSView {
                     let dissolve = CABasicAnimation(keyPath: "opacity")
                     dissolve.fromValue = 1
                     dissolve.toValue = 0
-                    dissolve.duration = 0.22
+                    dissolve.duration = 0.12
                     waveform.layer?.add(dissolve, forKey: "dissolve")
                 }
-                fadeIn(progress, delay: 0.08)
+                fadeIn(progress)
             }
         case .success:
             progress.isHidden = false
             progress.completeIntoCheck(animated: animated)
             setAccessibilityLabel("Dictation complete")
+        case .notice(let message, let symbol):
+            status.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            status.contentTintColor = .secondaryLabelColor
+            showStatusMessage(message, animated: animated)
         case .failed(let message):
             status.image = NSImage(systemSymbolName: "exclamationmark.circle.fill", accessibilityDescription: nil)
             status.contentTintColor = .systemOrange
-            status.isHidden = false
-            showMessage(message)
-            if animated {
-                fadeIn(status, delay: 0.24)
-                fadeIn(label, delay: 0.32)
-            }
+            showStatusMessage(message, animated: animated)
         }
         needsLayout = true
+    }
+
+    private func showStatusMessage(_ message: String, animated: Bool) {
+        status.isHidden = false
+        messageSurface.isHidden = false
+        messageSurface.setAccessibilityLabel(message)
+        showMessage(message)
+        if animated {
+            fadeIn(status)
+            fadeIn(label, delay: 0.18)
+        }
     }
 
     func showWorkingMessage(_ message: String, animated: Bool = false) {
         guard mode == .working else { return }
         showMessage(message)
-        if animated { fadeIn(label, delay: 0.32) }
+        if animated { fadeIn(label, delay: 0.18) }
     }
 
     private func showMessage(_ message: String) {
@@ -330,6 +413,7 @@ final class FlowBarContent: NSView {
             label.stringValue = "Dictation couldn't finish"
         }
         setAccessibilityLabel(label.stringValue)
+        messageSurface.setAccessibilityLabel(label.stringValue)
         needsLayout = true
     }
 
@@ -337,7 +421,7 @@ final class FlowBarContent: NSView {
         let fade = CABasicAnimation(keyPath: "opacity")
         fade.fromValue = 0
         fade.toValue = 1
-        fade.duration = 0.18
+        fade.duration = 0.12
         fade.beginTime = CACurrentMediaTime() + delay
         fade.fillMode = .backwards
         view.layer?.add(fade, forKey: "appear")
@@ -345,13 +429,22 @@ final class FlowBarContent: NSView {
 
     override func layout() {
         super.layout()
-        start.frame = NSRect(x: (bounds.width - 36) / 2, y: (bounds.height - 36) / 2, width: 36, height: 36)
+        start.frame = bounds
         recordingSurface.frame = bounds
-        waveform.frame = NSRect(x: 18, y: 12, width: max(0, bounds.width - 36), height: bounds.height - 24)
+        messageSurface.frame = bounds
+        let accessoryWidth = showsListeningAccessory ? Self.indicatorSize + Self.spacing : 0
+        waveform.frame = NSRect(x: Self.padding, y: 9, width: max(0, bounds.width - 2 * Self.padding - accessoryWidth), height: max(0, bounds.height - 18))
+        let accessoryFrame = NSRect(x: bounds.width - Self.padding - Self.indicatorSize, y: (bounds.height - Self.indicatorSize) / 2,
+                                    width: Self.indicatorSize, height: Self.indicatorSize)
+        stopGlyph.frame = accessoryFrame
+        let countdownHeight = ceil(countdown.intrinsicContentSize.height)
+        countdown.frame = NSRect(x: accessoryFrame.minX - 4, y: (bounds.height - countdownHeight) / 2,
+                                 width: accessoryFrame.width + 8, height: countdownHeight)
         let indicatorFrame = NSRect(x: Self.padding, y: (bounds.height - Self.indicatorSize) / 2,
                                     width: Self.indicatorSize, height: Self.indicatorSize)
         progress.frame = label.isHidden
-            ? NSRect(x: (bounds.width - 20) / 2, y: (bounds.height - 20) / 2, width: 20, height: 20)
+            ? NSRect(x: (bounds.width - Self.indicatorSize) / 2, y: (bounds.height - Self.indicatorSize) / 2,
+                     width: Self.indicatorSize, height: Self.indicatorSize)
             : indicatorFrame
         status.frame = indicatorFrame
         let labelX = indicatorFrame.maxX + Self.spacing
@@ -419,8 +512,11 @@ final class ProgressGlyphView: NSView {
         applyColors()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        ring.frame = bounds
-        check.frame = bounds
+        // A rotated layer's frame is its transformed bounding box. Setting it
+        // would distort bounds when completion freezes the spinner mid-turn.
+        ring.bounds = bounds
+        check.bounds = bounds
+        check.position = CGPoint(x: bounds.midX, y: bounds.midY)
         ring.path = CGPath(ellipseIn: bounds.insetBy(dx: 1, dy: 1), transform: nil)
         ring.anchorPoint = CGPoint(x: 0.5, y: 0.5)
         ring.position = CGPoint(x: bounds.midX, y: bounds.midY)
@@ -446,7 +542,7 @@ final class ProgressGlyphView: NSView {
         let grow = CABasicAnimation(keyPath: "strokeEnd")
         grow.fromValue = 0
         grow.toValue = 0.72
-        grow.duration = 0.3
+        grow.duration = 0.16
         grow.timingFunction = CAMediaTimingFunction(name: .easeOut)
         ring.strokeEnd = 0.72
         if animated { ring.add(grow, forKey: "grow") }
@@ -464,19 +560,19 @@ final class ProgressGlyphView: NSView {
         setAccessibilityLabel("Dictation complete")
         // Freeze the spin exactly where it is so the ring closes from its
         // current gap with no visual jump.
-        let angle = (ring.presentation()?.value(forKeyPath: "transform.rotation.z") as? Double) ?? 0
+        let rotation = ring.presentation()?.transform ?? ring.transform
         let partial = ring.presentation()?.strokeEnd ?? ring.strokeEnd
         ring.removeAllAnimations()
         check.removeAllAnimations()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        ring.setValue(angle, forKeyPath: "transform.rotation.z")
+        ring.transform = rotation
         CATransaction.commit()
 
         let close = CABasicAnimation(keyPath: "strokeEnd")
         close.fromValue = partial
         close.toValue = 1
-        close.duration = 0.2
+        close.duration = 0.16
         close.timingFunction = CAMediaTimingFunction(name: .easeOut)
         ring.strokeEnd = 1
         if animated { ring.add(close, forKey: "close") }
@@ -484,8 +580,8 @@ final class ProgressGlyphView: NSView {
         let draw = CABasicAnimation(keyPath: "strokeEnd")
         draw.fromValue = 0
         draw.toValue = 1
-        draw.duration = 0.26
-        draw.beginTime = CACurrentMediaTime() + 0.14
+        draw.duration = 0.2
+        draw.beginTime = check.convertTime(CACurrentMediaTime(), from: nil) + 0.06
         draw.timingFunction = CAMediaTimingFunction(name: .easeOut)
         draw.fillMode = .backwards
         check.strokeEnd = 1

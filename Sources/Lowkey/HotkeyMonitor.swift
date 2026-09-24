@@ -9,6 +9,7 @@ final class HotkeyMonitor {
     var hotkey: DictationHotkey = .rightCommand
 
     private var holding = false
+    var isHolding: Bool { holding }
 
     func start() {
         stop()

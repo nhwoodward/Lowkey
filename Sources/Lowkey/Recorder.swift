@@ -4,6 +4,9 @@ import Foundation
 
 final class Recorder {
     var onWave: (([CGFloat]) -> Void)?
+    // 20 ms of mono 16-bit audio at 16 kHz. Keep capture and meter updates
+    // frequent enough that a new syllable appears without waiting 64 ms.
+    static let bufferFrames = 320
 
     private var queue: AudioQueueRef?
     private var buffers: [AudioQueueBufferRef] = []
@@ -100,7 +103,7 @@ final class Recorder {
             guard deviceStatus == noErr else { stopCapture(); throw RecorderError.failedToStart }
         }
 
-        let bufferBytes: UInt32 = 2048
+        let bufferBytes = UInt32(Self.bufferFrames * MemoryLayout<Int16>.size)
         for _ in 0..<3 {
             var buffer: AudioQueueBufferRef?
             guard AudioQueueAllocateBuffer(newQueue, bufferBytes, &buffer) == noErr, let buffer else {
@@ -129,7 +132,8 @@ final class Recorder {
 
         let sampleCount = byteCount / 2
         let samples = data.bindMemory(to: Int16.self, capacity: sampleCount)
-        let slices = 6
+        // Two 10 ms bars per buffer preserve about 180 ms of waveform history.
+        let slices = 2
         let sliceSize = max(1, sampleCount / slices)
         var fresh: [CGFloat] = []
         for slice in 0..<slices {

@@ -15,6 +15,7 @@ fi
 swift build --product Lowkey
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$SUPPORT"
 cp "$(swift build --show-bin-path)/Lowkey" "$APP/Contents/MacOS/LowkeyDev"
+"$ROOT/Scripts/stamp-sdk.sh" "$APP/Contents/MacOS/LowkeyDev"
 cp Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier app.lowkey.development' "$APP/Contents/Info.plist"

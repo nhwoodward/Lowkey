@@ -34,23 +34,27 @@ final class Engine {
         }
     }
 
-    // Release the fallback's model while Parakeet is healthy. Unlike shutdown,
-    // retirement must allow the next failed inference to restart Whisper.
-    func retire() {
-        let ticket = stateLock.withLock { generation }
+    // Stop off the main thread. Completion runs only after the owned server
+    // has exited, so the next selected model can load without overlap.
+    func stop(completion: @escaping () -> Void) {
+        invalidate()
         queue.async {
-            guard self.isCurrent(ticket) else { return }
             self.teardownLocked()
+            DispatchQueue.main.async { completion() }
         }
     }
 
     func stop() {
+        invalidate()
+        queue.sync { self.teardownLocked() }
+    }
+
+    private func invalidate() {
         stateLock.withLock {
             generation += 1
             stopped = true
             ready = false
         }
-        queue.sync { self.teardownLocked() }
     }
 
     // Call only from the serialized background transcription queue.
@@ -96,12 +100,14 @@ final class Engine {
 
     private func teardownLocked() {
         if let process, process.isRunning {
+            let pid = process.processIdentifier
             process.terminate()
             Self.waitForExit(process, timeout: 1.5)
             if process.isRunning {
                 kill(process.processIdentifier, SIGKILL)
-                Self.waitForExit(process, timeout: 0.4)
+                process.waitUntilExit()
             }
+            AppLog.line("whisper stopped pid=\(pid)")
         }
         process = nil
         stateLock.withLock { ready = false }

@@ -34,6 +34,7 @@ if [[ -f "$ROOT/Resources/AppIcon.icns" ]]; then
     cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 fi
 chmod +x "$APP/Contents/MacOS/Lowkey"
+"$ROOT/Scripts/stamp-sdk.sh" "$APP/Contents/MacOS/Lowkey"
 
 # Keep the source plist stable while allowing tags such as v1.1.0 to identify
 # the app correctly in Finder and in System Settings.

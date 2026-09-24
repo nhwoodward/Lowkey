@@ -10,25 +10,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let flowBar = FlowBarController()
     private var settings: SettingsWindowController?
     private var mainWindow: MainWindowController?
+    private var setup: SetupWindowController?
     private var statusItem: NSStatusItem?
     private var recordStartedAt: Date?
-    private var recordLimitWork: DispatchWorkItem?
+    private var recordClock: Timer?
+    private var shownRemaining: Int?
     private var busy = false
     private var recording = false
-    private var lastTranscript = ""
-    private var escapeMonitor: Any?
-    private var localEscapeMonitor: Any?
+    private var capture = CaptureMode.hold
+    private var revealed = false
+    private var revealWork: DispatchWorkItem?
+    private var tapWork: DispatchWorkItem?
+    private var blockedWork: DispatchWorkItem?
+    private var ignoreNextRelease = false
+    private var keyMonitors: [Any] = []
     private var pasteTarget: PasteTarget?
     private var demoTimer: Timer?
     private let transcriptionQueue = DispatchQueue(label: "app.lowkey.transcription", qos: .userInitiated)
     private var recordingConfig: Config?
-    private var widgetRecording = false
     private var needsEngineRestart = false
+    private var engineGeneration = 0
+    private var engineSwitching = false
     private var lastExternalTarget: PasteTarget?
     private var activationObserver: NSObjectProtocol?
+    private var permissionTimer: Timer?
+    private var wasTrusted = PasteService.isTrusted()
 
+    // How the current recording ends.
+    private enum CaptureMode {
+        case hold       // releasing the shortcut finishes
+        case tap        // released quickly; a second press within the window locks hands-free
+        case handsFree  // the shortcut, a bar click, or the length limit finishes
+    }
 
     private static let maxRecordSeconds: TimeInterval = 120
+    private static let countdownSeconds: TimeInterval = 10
+    // The mic starts on press, but the bar and cue wait this long so that a
+    // shortcut such as Right Command-C never flashes dictation UI.
+    private static let revealDelay: TimeInterval = 0.15
+    private static let tapThreshold: TimeInterval = 0.3
+    private static let doubleTapWindow: TimeInterval = 0.35
+    private static let setupDismissedKey = "setupDismissed"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         captureExternalTarget()
@@ -37,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                   app.processIdentifier != getpid() else { return }
             self?.lastExternalTarget = PasteTarget(pid: app.processIdentifier, bundleIdentifier: app.bundleIdentifier ?? "", localizedName: app.localizedName ?? "")
         }
-        applyAppearance()
+        applyDockVisibility()
         applyLoginItem()
         buildApplicationMenu()
         buildStatusItem()
@@ -46,70 +68,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         #endif
         applyHotkey()
         restBar()
-        flowBar.onIdleTap = { [weak self] in
-            self?.widgetRecording = true
-            self?.beginHold()
-        }
-        flowBar.onStop = { [weak self] in self?.endHold() }
+        flowBar.onIdleTap = { [weak self] in self?.startFromBar() }
+        flowBar.onStop = { [weak self] in self?.finishRecording() }
         recorder.onWave = { [weak self] samples in
             self?.flowBar.pushWave(samples)
         }
-        hotkey.onHoldStart = { [weak self] in
-            guard let self, !self.recording else { return }
-            self.widgetRecording = false
-            self.beginHold()
-        }
-        hotkey.onHoldEnd = { [weak self] in
-            guard let self, !self.widgetRecording else { return }
-            self.endHold()
-        }
+        hotkey.onHoldStart = { [weak self] in self?.hotkeyPressed() }
+        hotkey.onHoldEnd = { [weak self] in self?.hotkeyReleased() }
         hotkey.start()
-        startEngines()
+        ParakeetEngine.shared.onStatusChange = { [weak self] in self?.refreshMenu() }
+        startSelectedEngine()
+        if !permissionsGranted && !UserDefaults.standard.bool(forKey: Self.setupDismissedKey) {
+            openSetup()
+        }
         setupDebugUI()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        recordLimitWork?.cancel()
+        stopRecordingClock()
         hotkey.stop()
         recorder.releaseMic()
         MediaPause.resumeIfNeeded()
+        engineGeneration += 1
         engine.stop()
-        listenForEscape(false)
+        ParakeetEngine.shared.unload()
+        watchKeys(false)
     }
 
     private func applyHotkey() {
         hotkey.hotkey = config.hotkey
     }
 
-    private var activeEngineReady: Bool {
-        (config.prefersParakeet && ParakeetEngine.shared.ready) || engine.isReady
+    private var engineStatus: EngineStatus {
+        if let error = config.selectedEngineError { return .failed(error.localizedDescription) }
+        let parakeet = config.engine == .parakeet
+        if engineSwitching {
+            return parakeet && ParakeetEngine.shared.downloading ? .downloading : .preparing
+        }
+        if parakeet ? ParakeetEngine.shared.ready : engine.isReady { return .ready }
+        return (parakeet ? ParakeetEngine.shared.lastError : engine.lastError).map(EngineStatus.failed) ?? .preparing
     }
 
-    private func startEngines() {
+    private var microphoneAllowed: Bool {
+        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+    }
+
+    private var permissionsGranted: Bool { microphoneAllowed && PasteService.isTrusted() }
+
+    private func startSelectedEngine() {
         let snapshot = config
-        let identity = snapshot.engineIdentity
-        if !snapshot.prefersParakeet || !ParakeetEngine.shared.ready {
-            engine.start(config: snapshot.whisperConfig) { [weak self] ok in
-                guard let self, self.config.engineIdentity == identity else { return }
-                if !ok && !self.activeEngineReady && !self.recording && !self.busy {
-                    self.flowBar.setMode(.failed(self.engine.lastError ?? "Speech recognition could not start"))
-                }
-                self.refreshMenu()
-            }
-        }
-        guard snapshot.prefersParakeet else { return }
-        ParakeetEngine.shared.start { [weak self] ok in
-            guard let self, self.config.engineIdentity == identity else { return }
-            if ok {
-                // Wait for any in-flight Whisper inference before retiring it.
-                self.transcriptionQueue.async {
-                    DispatchQueue.main.async {
-                        guard self.config.engineIdentity == identity, self.config.prefersParakeet else { return }
-                        self.engine.retire()
-                    }
-                }
+        engineGeneration += 1
+        let ticket = engineGeneration
+        engineSwitching = true
+        AppLog.line("engine selected=\(snapshot.engine.rawValue) language=\(snapshot.language)")
+        refreshMenu()
+        let finished: (Bool) -> Void = { [weak self] ok in
+            guard let self, self.engineGeneration == ticket else { return }
+            self.engineSwitching = false
+            if !ok && !self.recording && !self.busy, case .failed(let message) = self.engineStatus {
+                self.flowBar.setMode(.failed(message)) { [weak self] in self?.showSettings(page: "Dictation") }
             }
             self.refreshMenu()
+        }
+        if snapshot.engine == .parakeet {
+            engine.stop { [weak self] in
+                guard let self, self.engineGeneration == ticket else { return }
+                if snapshot.selectedEngineError != nil {
+                    ParakeetEngine.shared.unload { finished(false) }
+                } else {
+                    ParakeetEngine.shared.start(completion: finished)
+                }
+            }
+        } else {
+            ParakeetEngine.shared.unload { [weak self] in
+                guard let self, self.engineGeneration == ticket else { return }
+                self.engine.start(config: snapshot.whisperConfig, completion: finished)
+            }
         }
     }
 
@@ -119,7 +153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         applyHotkey()
         if needsEngineRestart {
             needsEngineRestart = false
-            startEngines()
+            startSelectedEngine()
         }
         refreshMenu()
     }
@@ -129,23 +163,132 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         flowBar.setMode(flowBar.restingMode)
     }
 
-    private func beginHold() {
-        if recording { return }
-        if busy {
-            if flowBar.mode == .working {
-                AppLog.line("hold ignored busy=working")
-                flowBar.nudge()
-            } else {
-                AppLog.line("hold ignored busy")
-                flowBar.setMode(.failed("Still working"))
+    // MARK: - Recording
+
+    private func hotkeyPressed() {
+        if recording {
+            switch capture {
+            case .hold: break
+            case .tap: lockHandsFree()
+            case .handsFree:
+                ignoreNextRelease = true
+                finishRecording()
             }
             return
         }
-        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
-            requestMicrophone()
-            flowBar.setMode(.failed("Enable Microphone in Settings > Privacy, then try again."))
+        ignoreNextRelease = false
+        watchKeys(true)
+        if let blocked = startBlocker() {
+            // Explain only once the press is clearly not part of a shortcut.
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.hotkey.isHolding, !self.recording else { return }
+                blocked()
+            }
+            blockedWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealDelay, execute: work)
             return
         }
+        beginRecording(.hold)
+    }
+
+    private func hotkeyReleased() {
+        blockedWork?.cancel()
+        blockedWork = nil
+        if !recording { watchKeys(false) }
+        if ignoreNextRelease {
+            ignoreNextRelease = false
+            return
+        }
+        guard recording, capture == .hold else { return }
+        if Date().timeIntervalSince(recordStartedAt ?? .distantPast) >= Self.tapThreshold {
+            finishRecording()
+            return
+        }
+        // A quick tap is either the first half of a double-tap or nothing.
+        capture = .tap
+        revealWork?.cancel()
+        revealWork = nil
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.recording, self.capture == .tap else { return }
+            AppLog.line("hold tap discarded")
+            self.cancelRecording()
+        }
+        tapWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.doubleTapWindow, execute: work)
+    }
+
+    private func startFromBar() {
+        guard !recording else { return }
+        if let blocked = startBlocker() {
+            blocked()
+            return
+        }
+        beginRecording(.handsFree)
+    }
+
+    private func lockHandsFree() {
+        tapWork?.cancel()
+        tapWork = nil
+        capture = .handsFree
+        ignoreNextRelease = true
+        AppLog.line("hands-free on")
+        if revealed {
+            flowBar.setListeningAccessory(handsFree: true, remaining: shownRemaining)
+        } else {
+            reveal()
+        }
+    }
+
+    // Why dictation cannot start right now, as the feedback that explains it.
+    // Importing a file needs the engine but not the microphone.
+    private func startBlocker(needsMicrophone: Bool = true) -> (() -> Void)? {
+        if busy {
+            return { [weak self] in
+                guard let self else { return }
+                if self.flowBar.mode == .working {
+                    AppLog.line("hold ignored busy=working")
+                    self.flowBar.nudge()
+                } else {
+                    AppLog.line("hold ignored busy")
+                    self.flowBar.setMode(.notice("Finishing the last dictation", symbol: "hourglass"))
+                }
+            }
+        }
+        switch needsMicrophone ? AVCaptureDevice.authorizationStatus(for: .audio) : .authorized {
+        case .authorized:
+            break
+        case .notDetermined:
+            return { [weak self] in
+                self?.requestMicrophone()
+                self?.flowBar.setMode(.notice("Allow microphone access, then try again", symbol: "mic"))
+            }
+        default:
+            return { [weak self] in
+                self?.flowBar.setMode(.failed("Microphone access is off")) { Self.openPrivacyPane("Privacy_Microphone") }
+            }
+        }
+        if let error = config.selectedEngineError {
+            return { [weak self] in
+                self?.flowBar.setMode(.failed(error.localizedDescription)) { [weak self] in self?.showSettings(page: "Dictation") }
+            }
+        }
+        guard engineStatus != .ready else { return nil }
+        return { [weak self] in
+            guard let self else { return }
+            if !self.engineSwitching { self.startSelectedEngine() }
+            switch self.engineStatus {
+            case .downloading:
+                self.flowBar.setMode(.notice("Downloading speech model…", symbol: "arrow.down.circle")) { [weak self] in self?.openSetup() }
+            case .failed(let message):
+                self.flowBar.setMode(.failed(message)) { [weak self] in self?.showSettings(page: "Dictation") }
+            case .preparing, .ready:
+                self.flowBar.setMode(.notice("Loading speech model…", symbol: "hourglass"))
+            }
+        }
+    }
+
+    private func beginRecording(_ mode: CaptureMode) {
+        guard !recording else { return }
         do {
             recordingConfig = config
             let focused = PasteTarget.capture()
@@ -156,19 +299,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // never clipped. Everything below is off the critical path.
             try recorder.start(deviceUID: config.microphoneUID.isEmpty ? nil : config.microphoneUID)
             recording = true
-            mainWindow?.setBusy(true)
-            flowBar.setMode(.listening)
-            listenForEscape(true)
-            scheduleRecordLimit()
-            playCue(.start)
-            resolveWeztermPane()
-            MediaPause.pauseIfNeeded(enabled: config.autoPauseAudio)
-            // Heat the transcription path while the user is still speaking.
-            Transcriber.warmUp(config: config)
+            capture = mode
+            revealed = false
+            shownRemaining = nil
+            watchKeys(true)
+            startRecordingClock()
+            if mode == .hold {
+                let work = DispatchWorkItem { [weak self] in self?.reveal() }
+                revealWork = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealDelay, execute: work)
+            } else {
+                reveal()
+            }
         } catch {
             pasteTarget = nil
+            watchKeys(false)
             flowBar.setMode(.failed(error.localizedDescription))
         }
+    }
+
+    private func reveal() {
+        revealWork?.cancel()
+        revealWork = nil
+        guard recording, !revealed else { return }
+        revealed = true
+        AppLog.line("dictation shown mode=\(capture)")
+        flowBar.setMode(.listening)
+        flowBar.setListeningAccessory(handsFree: capture == .handsFree, remaining: shownRemaining)
+        mainWindow?.setBusy(true)
+        playCue(.start)
+        MediaPause.pauseIfNeeded(enabled: config.autoPauseAudio)
+        resolveWeztermPane()
+        // Heat the transcription path while the user is still speaking.
+        Transcriber.warmUp(config: config)
     }
 
     private func resolveWeztermPane() {
@@ -184,13 +347,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func endHold() {
+    private func finishRecording() {
         guard recording else { return }
+        // Nothing was shown, so nothing is expected: treat it as a tap.
+        guard revealed else {
+            cancelRecording()
+            return
+        }
         recording = false
         busy = true
-        listenForEscape(false)
-        recordLimitWork?.cancel()
-        recordLimitWork = nil
+        tapWork?.cancel()
+        tapWork = nil
+        stopRecordingClock()
+        // Acknowledge release before microphone teardown and WAV/VAD work.
+        flowBar.setMode(.working)
+        watchKeys(false)
         playCue(.stop)
         recorder.releaseMic()
         MediaPause.resumeIfNeeded()
@@ -201,7 +372,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSRunningApplication(processIdentifier: target.pid)?.activate(options: [])
         }
         let snapshot = recordingConfig ?? config
-        widgetRecording = false
         transcriptionQueue.async { [weak self] in
             guard let self else { return }
             do {
@@ -229,21 +399,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
                 return
             }
-            DispatchQueue.main.sync {
-                self.flowBar.setMode(.working)
-            }
             do {
                 let outcome = try self.transcribeWithRecovery(fileURL: url, config: snapshot)
                 DispatchQueue.main.async {
                     switch outcome {
                     case .silence:
                         AppLog.line("release outcome=silence")
-                        self.flowBar.setMode(.failed("Nothing heard"))
+                        self.flowBar.setMode(.notice("Nothing heard", symbol: "waveform.slash"))
                     case .discardedNoise:
                         AppLog.line("release outcome=noise")
-                        self.flowBar.setMode(.failed("Discarded as noise"))
+                        self.flowBar.setMode(.notice("Nothing heard", symbol: "waveform.slash"))
                     case .text(let text):
-                        self.lastTranscript = text
                         HistoryStore.shared.add(
                             text: text,
                             duration: duration,
@@ -280,18 +446,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // If transcription fails, the engine may have died. Bring it back and try
-    // once more before surfacing the error.
+    // Recovery is limited to the selected engine. An error must never load
+    // a second model behind the user's selection.
     private func transcribeWithRecovery(fileURL: URL, config: Config) throws -> TranscriptOutcome {
-        let fallback = config.whisperConfig
-        if config.prefersParakeet && ParakeetEngine.shared.ready {
-            do { return try Transcriber.transcribe(fileURL: fileURL, config: config) }
-            catch { AppLog.line("primary transcription failed; recovering Whisper") }
+        if let error = config.selectedEngineError { throw error }
+        if config.engine == .parakeet {
+            return try Transcriber.transcribe(fileURL: fileURL, config: config)
         }
-        guard engine.ensureReady(config: fallback, timeout: 30) else {
+        let selected = config.whisperConfig
+        guard engine.ensureReady(config: selected, timeout: 30) else {
             throw TranscriberError.server(engine.lastError ?? "Whisper is unavailable. Check Dictation settings.")
         }
-        return try Transcriber.transcribe(fileURL: fileURL, config: fallback)
+        return try Transcriber.transcribe(fileURL: fileURL, config: selected)
     }
 
     private static func friendlyMessage(for error: Error) -> String {
@@ -306,18 +472,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return error.localizedDescription
     }
 
-    private func cancelHold() {
+    private func cancelRecording() {
+        blockedWork?.cancel()
+        blockedWork = nil
         guard recording else {
             if !busy { restBar() }
             return
         }
+        AppLog.line("dictation cancelled mode=\(capture) shown=\(revealed)")
         recording = false
-        widgetRecording = false
         busy = false
         pasteTarget = nil
-        listenForEscape(false)
-        recordLimitWork?.cancel()
-        recordLimitWork = nil
+        revealWork?.cancel()
+        revealWork = nil
+        tapWork?.cancel()
+        tapWork = nil
+        stopRecordingClock()
+        watchKeys(false)
         MediaPause.resumeIfNeeded()
         if let url = recorder.stop() {
             try? FileManager.default.removeItem(at: url)
@@ -326,44 +497,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         finishOperation()
     }
 
-    private func listenForEscape(_ on: Bool) {
-        if let escapeMonitor {
-            NSEvent.removeMonitor(escapeMonitor)
-            self.escapeMonitor = nil
-        }
-        if let localEscapeMonitor {
-            NSEvent.removeMonitor(localEscapeMonitor)
-            self.localEscapeMonitor = nil
-        }
+    // Escape cancels. Any other key or a click while the shortcut is held
+    // means it was a chord such as Right Command-C, so the take is dropped.
+    private func watchKeys(_ on: Bool) {
+        keyMonitors.forEach(NSEvent.removeMonitor)
+        keyMonitors = []
         guard on else { return }
-        escapeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 { self?.cancelHold() }
+        if let monitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] event in
+            _ = self?.handleKey(event)
+        }) {
+            keyMonitors.append(monitor)
         }
-        localEscapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 {
-                self?.cancelHold()
-                return nil
-            }
-            return event
+        if let monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] event in
+            // Clicking the bar is how a recording finishes, not a chord.
+            if event.type != .keyDown, event.window is NSPanel { return event }
+            return self?.handleKey(event) == true ? nil : event
+        }) {
+            keyMonitors.append(monitor)
         }
     }
 
-    private func scheduleRecordLimit() {
-        recordLimitWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            self?.endHold()
+    private func handleKey(_ event: NSEvent) -> Bool {
+        if event.type == .keyDown, event.keyCode == 53 {
+            guard recording else { return false }
+            cancelRecording()
+            return true
         }
-        recordLimitWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.maxRecordSeconds, execute: work)
+        guard hotkey.isHolding else { return false }
+        if !recording {
+            blockedWork?.cancel()
+            blockedWork = nil
+        } else if capture == .hold {
+            AppLog.line("hold chord discarded")
+            cancelRecording()
+        }
+        return false
+    }
+
+    private func startRecordingClock() {
+        stopRecordingClock()
+        let started = recordStartedAt ?? Date()
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            guard let self, self.recording else { return }
+            let left = Self.maxRecordSeconds - Date().timeIntervalSince(started)
+            if left <= 0 {
+                self.finishRecording()
+                return
+            }
+            let remaining = left <= Self.countdownSeconds ? Int(left.rounded(.up)) : nil
+            guard remaining != self.shownRemaining else { return }
+            self.shownRemaining = remaining
+            if self.revealed {
+                self.flowBar.setListeningAccessory(handsFree: self.capture == .handsFree, remaining: remaining)
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        recordClock = timer
+    }
+
+    private func stopRecordingClock() {
+        recordClock?.invalidate()
+        recordClock = nil
+        shownRemaining = nil
     }
 
     private func reportPaste(_ outcome: PasteService.PasteOutcome) {
         guard outcome == .failed else { return }
         AppLog.line("paste failed")
-        let message = config.clipboardBehavior == .never
-            ? "Paste couldn't finish. Your text is saved in History."
-            : "Paste couldn't finish. Your text is on the clipboard."
-        flowBar.setMode(.failed(message))
+        if config.clipboardBehavior == .never {
+            flowBar.setMode(.failed("Couldn't paste. Your text is in History")) { [weak self] in self?.openMain() }
+        } else if !PasteService.isTrusted() {
+            flowBar.setMode(.notice("Copied. Allow Accessibility to paste", symbol: "doc.on.clipboard")) { [weak self] in self?.openSetup() }
+        } else {
+            flowBar.setMode(.notice("Copied. Press ⌘V to paste", symbol: "doc.on.clipboard"))
+        }
     }
 
     private enum RecordCue {
@@ -382,12 +589,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sound.play()
     }
 
+    // MARK: - Menu bar
+
     private func buildStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = item.button {
-            button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Lowkey")
-            button.image?.isTemplate = true
-        }
         let menu = NSMenu()
         menu.autoenablesItems = false
         menu.delegate = self
@@ -401,63 +606,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func refreshMenu() {
-        guard let menu = statusItem?.menu else { return }
-        menu.removeAllItems()
         mainWindow?.setBusy(busy || recording)
-        let status = activeEngineReady ? "Ready to dictate" : "Preparing speech recognition…"
-        settings?.refreshStatus(engineReady: activeEngineReady, engineError: engine.lastError)
-        let header = NSMenuItem(title: "Lowkey", action: nil, keyEquivalent: "")
-        header.isEnabled = false
-        menu.addItem(header)
-        menu.addItem(withTitle: "Hold \(config.hotkey.title) to dictate", action: nil, keyEquivalent: "")
-        menu.addItem(withTitle: status, action: nil, keyEquivalent: "")
-        let trusted = PasteService.isTrusted()
-        if trusted {
-            menu.addItem(withTitle: "Accessibility is active", action: nil, keyEquivalent: "")
-        } else {
-            menu.addItem(NSMenuItem(title: "Grant Accessibility…", action: #selector(grantAccess), keyEquivalent: ""))
-            menu.addItem(NSMenuItem(title: "Relaunch", action: #selector(relaunch), keyEquivalent: ""))
+        let status = engineStatus
+        settings?.refreshStatus(status)
+        setup?.refresh(status: status)
+        if !permissionsGranted { watchPermissions() }
+        guard let item = statusItem, let menu = item.menu else { return }
+
+        let attention = !permissionsGranted || { if case .failed = status { return true }; return false }()
+        if let button = item.button {
+            let symbol = attention ? "waveform.badge.exclamationmark" : "waveform"
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Lowkey")
+                ?? NSImage(systemSymbolName: "waveform", accessibilityDescription: "Lowkey")
+            button.image?.isTemplate = true
+            button.appearsDisabled = status == .preparing || status == .downloading
+            button.toolTip = "Lowkey: \(status == .ready ? "Ready" : status.summary)"
+        }
+
+        menu.removeAllItems()
+        let line = status == .ready ? "Hold \(config.hotkey.title) to dictate" : status.summary
+        let statusLine = NSMenuItem(title: line, action: nil, keyEquivalent: "")
+        statusLine.isEnabled = false
+        menu.addItem(statusLine)
+        if !permissionsGranted {
+            menu.addItem(NSMenuItem(title: "Finish Setup…", action: #selector(openSetup), keyEquivalent: ""))
         }
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Open Lowkey", action: #selector(openMain), keyEquivalent: "o"))
-        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
-        let paste = NSMenuItem(title: "Paste last transcript", action: #selector(pasteLast), keyEquivalent: "")
-        paste.isEnabled = !lastTranscript.isEmpty
+        let paste = NSMenuItem(title: "Paste Last Dictation", action: #selector(pasteLast), keyEquivalent: "")
+        paste.isEnabled = !HistoryStore.shared.items.isEmpty && !busy && !recording
         menu.addItem(paste)
+        menu.addItem(NSMenuItem(title: "History", action: #selector(openMain), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Lowkey", action: #selector(quit), keyEquivalent: "q"))
         menu.items.forEach { $0.target = self }
     }
 
+    // Key monitors installed before Accessibility is granted never receive
+    // events, so the shortcut restarts as soon as trust arrives.
+    private func watchPermissions() {
+        guard permissionTimer == nil else { return }
+        permissionTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] timer in
+            guard let self else { return timer.invalidate() }
+            let trusted = PasteService.isTrusted()
+            if trusted != self.wasTrusted {
+                self.wasTrusted = trusted
+                if trusted {
+                    AppLog.line("accessibility granted; restarting shortcut monitor")
+                    self.hotkey.start()
+                }
+            }
+            if self.permissionsGranted {
+                timer.invalidate()
+                self.permissionTimer = nil
+            }
+            self.refreshMenu()
+        }
+    }
+
+    // MARK: - Windows
+
     @objc private func openSettings() {
+        showSettings(page: nil)
+    }
+
+    private func showSettings(page: String?) {
         captureExternalTarget()
         if settings == nil {
-            let controller = SettingsWindowController(
-                config: config,
-                engineReady: activeEngineReady,
-                engineError: engine.lastError
-            )
+            let controller = SettingsWindowController(config: config, status: engineStatus)
             controller.onApply = { [weak self] next in
                 self?.applySettings(next)
             }
             settings = controller
         }
+        if let page { settings?.select(page: page) }
         NSApp.activate(ignoringOtherApps: true)
         settings?.showWindow(nil)
         settings?.window?.makeKeyAndOrderFront(nil)
-        settings?.refreshStatus(engineReady: activeEngineReady, engineError: engine.lastError)
+        settings?.refreshStatus(engineStatus)
     }
 
     @objc private func openMain() {
         captureExternalTarget()
         if mainWindow == nil {
-            let window = MainWindowController(language: config.language)
+            let window = MainWindowController(hotkeyTitle: config.hotkey.title)
             window.onOpenSettings = { [weak self] in self?.openSettings() }
-            window.onLanguageChange = { [weak self] code in
-                guard let self else { return }
-                var next = self.config
-                next.language = code
-                self.applySettings(next)
+            window.pasteTargetName = { [weak self] in
+                self?.lastExternalTarget?.localizedName.nilIfEmpty
             }
             window.onUpload = { [weak self] url in self?.transcribeFile(url) }
             window.onPasteItem = { [weak self] item in
@@ -466,14 +701,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             mainWindow = window
         }
-        mainWindow?.setLanguage(config.language)
         NSApp.activate(ignoringOtherApps: true)
         mainWindow?.showWindow(nil)
         mainWindow?.window?.makeKeyAndOrderFront(nil)
     }
 
+    @objc private func openSetup() {
+        captureExternalTarget()
+        if setup == nil {
+            let controller = SetupWindowController(hotkeyTitle: config.hotkey.title, status: engineStatus)
+            controller.onDone = {
+                UserDefaults.standard.set(true, forKey: Self.setupDismissedKey)
+            }
+            setup = controller
+        }
+        setup?.refresh(status: engineStatus)
+        NSApp.activate(ignoringOtherApps: true)
+        setup?.showWindow(nil)
+        setup?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    private static func openPrivacyPane(_ anchor: String) {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     private func transcribeFile(_ url: URL) {
         guard !busy, !recording else { flowBar.nudge(); return }
+        if let blocked = startBlocker(needsMicrophone: false) {
+            blocked()
+            return
+        }
         busy = true
         mainWindow?.setBusy(true)
         let snapshot = config
@@ -488,11 +747,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 DispatchQueue.main.async {
                     switch outcome {
                     case .text(let text):
-                        self.lastTranscript = text
                         HistoryStore.shared.add(text: text, duration: audio.duration, language: snapshot.language, audioURL: audio.url)
                         self.flowBar.setMode(.success)
-                    case .discardedNoise: self.flowBar.setMode(.failed("Discarded as noise"))
-                    case .silence: self.flowBar.setMode(.failed("Nothing heard"))
+                    case .discardedNoise, .silence:
+                        self.flowBar.setMode(.notice("No speech found in this file", symbol: "waveform.slash"))
                     }
                     try? FileManager.default.removeItem(at: audio.url)
                     self.finishOperation()
@@ -513,15 +771,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         config = next
         config.save()
         if !recording { applyHotkey() }
-        applyAppearance()
+        applyDockVisibility()
         applyLoginItem()
         flowBar.restingMode = config.showBarAlways ? .idle : .hidden
         if !recording && !busy { restBar() }
         settings?.update(config: config)
-        mainWindow?.setLanguage(config.language)
+        mainWindow?.setHotkeyTitle(config.hotkey.title)
+        setup?.setHotkeyTitle(config.hotkey.title)
         if restart {
             if recording || busy { needsEngineRestart = true }
-            else { startEngines() }
+            else { startSelectedEngine() }
         }
         refreshMenu()
     }
@@ -567,25 +826,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         main.addItem(fileItem)
         let editItem = NSMenuItem()
         let edit = NSMenu(title: "Edit")
-        for (title, action, key) in [("Undo", "undo:", "z"), ("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] {
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        edit.addItem(.separator())
+        for (title, action, key) in [("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] {
             edit.addItem(withTitle: title, action: Selector(action), keyEquivalent: key)
         }
         editItem.submenu = edit
         main.addItem(editItem)
         let windowItem = NSMenuItem()
         let windows = NSMenu(title: "Window")
-        let open = windows.addItem(withTitle: "Dictation History", action: #selector(openMain), keyEquivalent: "o")
-        open.target = self
         windows.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windows.addItem(.separator())
+        let history = windows.addItem(withTitle: "History", action: #selector(openMain), keyEquivalent: "")
+        history.target = self
         windowItem.submenu = windows
         main.addItem(windowItem)
         NSApp.mainMenu = main
         NSApp.windowsMenu = windows
     }
 
-    private func applyAppearance() {
+    private func applyDockVisibility() {
         NSApp.setActivationPolicy(config.hideFromDock ? .accessory : .regular)
-        NSApp.appearance = config.appearance.nsAppearance
     }
 
     private func applyLoginItem() {
@@ -604,34 +866,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func pasteLast() {
-        guard !lastTranscript.isEmpty else { return }
+        guard let text = HistoryStore.shared.items.first?.text else { return }
         captureExternalTarget()
-        pasteHistoryText(lastTranscript)
-    }
-
-    @objc private func grantAccess() {
-        PasteService.promptAccessibilityIfNeeded()
-        PasteService.openAccessibilitySettings()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            let alert = NSAlert()
-            alert.messageText = "Turn on Accessibility for Lowkey"
-            alert.informativeText = "In Device Control and Data Access, enable Lowkey, then relaunch.\n\nIf the switch is already on and paste still fails, remove Lowkey, add ~/Applications/Lowkey.app again, turn it on, and relaunch. macOS sometimes keeps a stale code hash from an older build."
-            alert.addButton(withTitle: "Relaunch now")
-            alert.addButton(withTitle: "Later")
-            NSApp.activate(ignoringOtherApps: true)
-            if alert.runModal() == .alertFirstButtonReturn {
-                self?.relaunch()
-            }
-        }
-    }
-
-    @objc private func relaunch() {
-        let path = Bundle.main.bundlePath
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        task.arguments = ["-c", "sleep 0.4; /usr/bin/open \"$1\"", "relaunch", path]
-        try? task.run()
-        NSApp.terminate(nil)
+        pasteHistoryText(text)
     }
 
     @objc private func quit() {
@@ -639,19 +876,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func requestMicrophone() {
-        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in
-                DispatchQueue.main.async { self?.refreshMenu() }
-            }
-        } else { openSettings() }
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined else { return }
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in
+            DispatchQueue.main.async { self?.refreshMenu() }
+        }
     }
 
-    // Dev-only hook: LOWKEY_UI=main|settings|flow|flow-audit|fail drives UI states
-    // without a mic or a menu click, for screenshots and animation checks.
+    // Dev-only hook: LOWKEY_UI=main|settings|settings:<Page>|setup|flow|flow-audit|fail
+    // drives UI states without a mic or a menu click, for screenshots and animation checks.
     private func setupDebugUI() {
         #if !DEBUG
         return
         #else
+        DebugSnapshot.startIfRequested()
         switch ProcessInfo.processInfo.environment["LOWKEY_APPEARANCE"] {
         case "light": NSApp.appearance = NSAppearance(named: .aqua)
         case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
@@ -662,10 +899,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             openMain()
         case "settings":
             openSettings()
+        case let ui? where ui.hasPrefix("settings:"):
+            showSettings(page: String(ui.dropFirst("settings:".count)))
+        case "setup":
+            openSetup()
         case "flow":
             startFlowDemo()
         case "flow-audit":
             startFlowAudit()
+        case "gesture-audit":
+            startGestureAudit()
         case "fail":
             flowBar.setMode(.failed("Whisper engine is not responding"))
         default:
@@ -675,22 +918,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     #if DEBUG
+    // Drives the real shortcut handler, recorder and bar through each gesture.
+    // It records the room, so it never pastes what it hears.
+    private func startGestureAudit() {
+        setenv("LOWKEY_NO_PASTE", "1", 1)
+        let down: NSEvent.ModifierFlags
+        switch config.hotkey {
+        case .rightCommand: down = NSEvent.ModifierFlags(rawValue: NSEvent.ModifierFlags.command.rawValue | 0x10)
+        case .leftCommand: down = NSEvent.ModifierFlags(rawValue: NSEvent.ModifierFlags.command.rawValue | 0x08)
+        case .rightOption: down = NSEvent.ModifierFlags(rawValue: NSEvent.ModifierFlags.option.rawValue | 0x40)
+        case .function: down = .function
+        }
+        let code = config.hotkey.keyCode
+        func key(_ character: String, _ keyCode: UInt16) -> NSEvent {
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: down, timestamp: 0, windowNumber: 0,
+                             context: nil, characters: character, charactersIgnoringModifiers: character,
+                             isARepeat: false, keyCode: keyCode)!
+        }
+        let steps: [(TimeInterval, String, () -> Void)] = [
+            (4.0, "hold: press", { self.hotkey.handle(keyCode: code, flags: down) }),
+            (5.2, "hold: release after 1.2 s", { self.hotkey.handle(keyCode: code, flags: []) }),
+            (10.0, "chord: press", { self.hotkey.handle(keyCode: code, flags: down) }),
+            (10.08, "chord: C key", { _ = self.handleKey(key("c", 8)) }),
+            (10.3, "chord: release", { self.hotkey.handle(keyCode: code, flags: []) }),
+            (12.0, "tap: press", { self.hotkey.handle(keyCode: code, flags: down) }),
+            (12.1, "tap: release", { self.hotkey.handle(keyCode: code, flags: []) }),
+            (14.0, "double-tap: press", { self.hotkey.handle(keyCode: code, flags: down) }),
+            (14.1, "double-tap: release", { self.hotkey.handle(keyCode: code, flags: []) }),
+            (14.25, "double-tap: press again", { self.hotkey.handle(keyCode: code, flags: down) }),
+            (14.35, "double-tap: release again", { self.hotkey.handle(keyCode: code, flags: []) }),
+            (17.0, "hands-free: press to finish", { self.hotkey.handle(keyCode: code, flags: down) }),
+            (17.1, "hands-free: release", { self.hotkey.handle(keyCode: code, flags: []) }),
+            (22.0, "escape: double-tap", { self.hotkey.handle(keyCode: code, flags: down) }),
+            (22.1, "escape: release", { self.hotkey.handle(keyCode: code, flags: []) }),
+            (22.2, "escape: press again", { self.hotkey.handle(keyCode: code, flags: down) }),
+            (22.3, "escape: release again", { self.hotkey.handle(keyCode: code, flags: []) }),
+            (23.5, "escape: Esc key", { _ = self.handleKey(key("\u{1b}", 53)) }),
+        ]
+        for (time, label, action) in steps {
+            DispatchQueue.main.asyncAfter(deadline: .now() + time) {
+                action()
+                AppLog.line("audit \(label): recording=\(self.recording) mode=\(self.capture) shown=\(self.revealed) busy=\(self.busy) bar=\(self.flowBar.mode)")
+            }
+        }
+    }
+
     private func startFlowAudit() {
         // Exercise real panel layout without forcing permission or engine failures.
-        let states: [FlowBarMode] = [
-            .listening, .working, .success,
-            .failed("Nothing heard"), .failed("Discarded as noise"),
-            .failed("Still working"), .failed("Couldn't save the recording"),
-            .failed("Whisper engine is not responding"),
-            .failed("Enable Microphone in Settings > Privacy, then try again."),
-            .failed("Paste couldn't finish. Your text is on the clipboard."),
-            .failed("Whisper model not found at\n/Users/example/" + String(repeating: "Long model folder/", count: 12)),
+        let states: [(FlowBarMode, Bool, Int?)] = [
+            (.listening, false, nil), (.listening, true, nil), (.listening, true, 7), (.working, false, nil), (.success, false, nil),
+            (.notice("Nothing heard", symbol: "waveform.slash"), false, nil),
+            (.notice("Copied. Press ⌘V to paste", symbol: "doc.on.clipboard"), false, nil),
+            (.notice("Copied. Allow Accessibility to paste", symbol: "doc.on.clipboard"), false, nil),
+            (.notice("Downloading speech model…", symbol: "arrow.down.circle"), false, nil),
+            (.notice("Allow microphone access, then try again", symbol: "mic"), false, nil),
+            (.failed("Microphone access is off"), false, nil),
+            (.failed("Couldn't save the recording"), false, nil),
+            (.failed("Whisper engine is not responding"), false, nil),
+            (.failed("Whisper model not found at\n/Users/example/" + String(repeating: "Long model folder/", count: 12)), false, nil),
         ]
         var step = 0
         func advance() {
-            let state = states[step % states.count]
+            let (state, handsFree, remaining) = states[step % states.count]
             flowBar.setMode(state)
-            if state == .listening { flowBar.pushWave((0..<18).map { CGFloat(($0 % 6) + 1) / 7 }) }
+            if state == .listening {
+                flowBar.setListeningAccessory(handsFree: handsFree, remaining: remaining)
+                flowBar.pushWave((0..<18).map { CGFloat(($0 % 6) + 1) / 7 })
+            }
             if state == .working {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.flowBar.nudge() }
             }
@@ -731,4 +1025,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
     #endif
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

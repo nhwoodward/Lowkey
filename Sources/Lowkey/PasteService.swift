@@ -59,6 +59,15 @@ enum PasteService {
             completion?(.unknown)
             return
         }
+        #if DEBUG
+        // Review and audit runs must never type into, or overwrite the
+        // clipboard of, whatever app happens to be in front.
+        if ProcessInfo.processInfo.environment["LOWKEY_NO_PASTE"] == "1" {
+            log("insert skipped LOWKEY_NO_PASTE len=\(text.count)")
+            DispatchQueue.main.async { completion?(.unknown) }
+            return
+        }
+        #endif
 
         deliveryQueue.async {
             let destination = target ?? DispatchQueue.main.sync { PasteTarget.capture() }

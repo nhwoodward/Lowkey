@@ -16,6 +16,16 @@ final class HotkeyTests: XCTestCase {
         monitor.handle(keyCode: 55, flags: [])
         XCTAssertEqual(ends, 1)
     }
+    func testHoldingStateTracksThePhysicalKeyForChordDetection() {
+        let monitor = HotkeyMonitor()
+        monitor.hotkey = .rightOption
+        XCTAssertFalse(monitor.isHolding)
+        monitor.handle(keyCode: 61, flags: NSEvent.ModifierFlags(rawValue: NSEvent.ModifierFlags.option.rawValue | 0x40))
+        XCTAssertTrue(monitor.isHolding)
+        monitor.handle(keyCode: 61, flags: [])
+        XCTAssertFalse(monitor.isHolding)
+    }
+
     func testWrongModifierDoesNotStartRecording() {
         let monitor = HotkeyMonitor()
         var starts = 0

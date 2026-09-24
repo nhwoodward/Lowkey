@@ -2,7 +2,7 @@ import XCTest
 @testable import Lowkey
 
 final class LanguageRoutingTests: XCTestCase {
-    func testAutomaticLanguageUsesMultilingualFallbackWithoutChangingEnglishPreference() throws {
+    func testLanguageNeverOverridesSelectedEngine() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -14,18 +14,22 @@ final class LanguageRoutingTests: XCTestCase {
         config.engine = .parakeet
         config.language = "en"
         config.modelPath = english.path
-        XCTAssertTrue(config.prefersParakeet)
+        XCTAssertEqual(config.engine, .parakeet)
         XCTAssertEqual(config.whisperConfig.modelPath, english.path)
 
         for language in ["auto", "es", "fr"] {
             config.language = language
-            XCTAssertFalse(config.prefersParakeet, "An English-only recognizer cannot satisfy \(language)")
-            let fallback = config.whisperConfig
-            XCTAssertEqual(fallback.engine, .whisper)
-            XCTAssertEqual(fallback.language, language)
-            XCTAssertEqual(fallback.modelPath, multilingual.path)
+            XCTAssertNotNil(config.selectedEngineError, "An English-only recognizer cannot satisfy \(language)")
+            let resolved = config.whisperConfig
+            XCTAssertEqual(resolved.engine, .parakeet, "Resolving a model path must not change the selected engine")
+            XCTAssertEqual(resolved.language, language)
+            XCTAssertEqual(resolved.modelPath, multilingual.path)
             XCTAssertEqual(config.modelPath, english.path)
             XCTAssertEqual(config.engine, .parakeet)
+            config.engine = .whisper
+            XCTAssertNil(config.selectedEngineError)
+            XCTAssertEqual(config.whisperConfig.modelPath, multilingual.path)
+            config.engine = .parakeet
         }
     }
 }

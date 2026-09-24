@@ -3,7 +3,7 @@
 <p align="center">
   <a href="#quick-start"><img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-111111?style=flat-square" /></a>
   <a href="#what-it-is"><img alt="8 GB of RAM and up" src="https://img.shields.io/badge/RAM-8%20GB%2B-111111?style=flat-square" /></a>
-  <a href="#privacy"><img alt="Parakeet on the Neural Engine, Whisper fallback" src="https://img.shields.io/badge/engine-Parakeet%20%2B%20Whisper-111111?style=flat-square" /></a>
+  <a href="#privacy"><img alt="Parakeet or Whisper, one engine at a time" src="https://img.shields.io/badge/engine-Parakeet%20%2B%20Whisper-111111?style=flat-square" /></a>
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" /></a>
 </p>
 
@@ -26,19 +26,20 @@ Lowkey gives local speech recognition a dedicated path through Apple's Neural En
 
 Hold **Right Command**, talk, let go. [NVIDIA Parakeet v2](https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v2-coreml) runs on the **Apple Neural Engine** inside the app itself: no separate server for primary recognition. Its English-only vocabulary keeps English dictation from switching to another language. The words land wherever the cursor is. Recognition time varies with the recording and current system load.
 
-Whisper stays on board as the safety net. It covers dictation while Parakeet's model downloads on first launch, takes over automatically if Parakeet ever fails, and handles non-English dictation.
+Choose Parakeet or Whisper in Settings > Dictation. Only the selected engine loads into memory. Switching engines unloads the previous model before loading the next; recordings already in progress finish first. Lowkey never starts the other engine automatically, including during downloads or after errors. Whisper supports Intel Macs and non-English dictation with a multilingual model.
 
 
 
 ## Features
 
-- **Native macOS interface** - system toolbars and grouped settings. The floating recorder uses Liquid Glass on macOS 26+, with an adaptive material on macOS 14 and 15. Release your shortcut or click the waveform bar to finish; press Escape to cancel.
-- **Hold to talk** - Right Command by default. Switch to Left Command, Right Option, or Fn. Press **Esc** while holding to discard the take.
+- **Hold to talk, double-tap for hands-free** - Right Command by default; switch to Left Command, Right Option, or Fn. Release to insert. Double-tap to keep listening, then press once more or click the bar to finish. **Esc** discards the take. Shortcuts stay shortcuts: pressing another key or clicking while you hold (Right Command-C, Command-click) cancels silently, with no sound or bar.
+- **Native macOS interface** - system toolbars and grouped settings. The floating bar uses Liquid Glass on macOS 26+, with an adaptive material on macOS 14 and 15. It counts down the last 10 seconds of the two-minute limit, and a message with a fix (such as allowing Accessibility) opens it when clicked.
+- **Guided setup** - the first launch checks Microphone, Accessibility, and the speech model download with live status. Granting Accessibility takes effect without a relaunch. The menu bar icon shows a badge while anything still needs attention.
 - **Neural Engine first** - Parakeet TDT (int8) transcribes in-process on the ANE. This keeps the primary recognition workload off the GPU. Performance and memory use depend on the model, audio, hardware, and current system load.
-- **Whisper as the fallback** - `whisper-server` on `127.0.0.1` with `ggml-small.en-q5_1`, greedy decode, and encoder cropping sized to the clip. If Parakeet is unavailable for any reason, dictation still works.
-- **Warm before you finish talking** - engines pre-heat when recording starts, so the audio always hits a hot pipeline.
+- **Whisper when selected** - `whisper-server` on `127.0.0.1` with `ggml-small.en-q5_1`, greedy decode, and encoder cropping sized to the clip. Choose it in Dictation settings when you need a different recognizer.
+- **Ready before recording** - the selected model loads before dictation begins. Whisper also warms when recording starts to reduce its idle wake-up cost.
 - **Spoken pauses stay spoken** - segment breaks, stray ellipses, and the capitalization glitches they cause are cleaned out of the transcript instead of pasted into your text.
-- **Paste, then keep the words** - sends directly to the focused WezTerm pane when WezTerm is active, or uses a keystroke paste elsewhere. If delivery cannot land, the transcript is still on the clipboard.
+- **Paste, then keep the words** - sends directly to the focused WezTerm pane when WezTerm is active, or uses a keystroke paste elsewhere. If delivery cannot land, the bar says where the words are: on the clipboard, or in History when clipboard copies are turned off. **Paste Last Dictation** in the menu bar sends it again.
 - **Your names, your phrases** - custom vocabulary for names and spelling, plus spoken snippets that expand into saved text.
 - **History stays here** - replay, recopy, or delete. Imported audio is copied and normalized, and original files remain untouched. Double-click a history entry to read or copy its full text. Audio and transcripts live under Application Support, not this repository.
 - **Menu bar, not a dock hog** - hide from the Dock, start at login, optionally pause Music or Spotify while you talk.
@@ -57,13 +58,13 @@ Whisper stays on board as the safety net. It covers dictation while Parakeet's m
 
 ### Download the latest release (recommended)
 
-GitHub Releases contain prebuilt apps. The release installer downloads the correct build, installs the Whisper fallback engine, and fetches its model. It does not clone the repository or compile Swift:
+GitHub Releases contain prebuilt apps. The release installer downloads the correct build, installs the Whisper engine, and fetches its model. It does not clone the repository or compile Swift:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nhwoodward/Lowkey/main/Scripts/install-release.sh | zsh
 ```
 
-You can also download an archive manually from the [Releases page](https://github.com/nhwoodward/Lowkey/releases/latest): choose `Lowkey-arm64.zip` for Apple silicon. (`Lowkey-x86_64.zip` exists for Intel Macs, which have no Neural Engine and run on the Whisper engine alone.) The installer script is recommended because the app also needs `whisper-server` and its fallback model.
+You can also download an archive manually from the [Releases page](https://github.com/nhwoodward/Lowkey/releases/latest): choose `Lowkey-arm64.zip` for Apple silicon. (`Lowkey-x86_64.zip` exists for Intel Macs, which have no Neural Engine and run on the Whisper engine alone.) The installer script is recommended because the app also needs `whisper-server` and its model.
 
 ### Build from source
 
@@ -75,7 +76,7 @@ cd Lowkey
 ./Scripts/install.sh
 ```
 
-The installer fetches the Whisper fallback model (~181 MB); Lowkey downloads the Parakeet model (~500 MB) on first launch and dictates through Whisper until it is ready. Grant **Microphone** and **Accessibility** when macOS asks. Hold **Right Command**, speak, release. Press **Esc** while holding to discard.
+The installer fetches the Whisper model (~181 MB); Lowkey downloads the Parakeet model (~500 MB) when Parakeet is selected. Downloaded models stay on disk when you switch; they do not both stay loaded in memory. On first launch, the setup window asks for **Microphone** and **Accessibility** and shows the model download. Hold **Right Command**, speak, release. Press **Esc** to discard.
 
 ## How it works
 
@@ -87,17 +88,17 @@ The installer fetches the Whisper fallback model (~181 MB); Lowkey downloads the
         │ Flow Bar         │  live waveform while you talk
         └────────┬─────────┘
                  ▼
-        ┌──────────────────┐     ┌──────────────────┐
-        │ Parakeet TDT     │ ──▶ │ whisper-server   │  fallback
-        │ Neural Engine,   │     │ 127.0.0.1:18789  │  first launch,
-        │ in-process       │     │ small.en-q5_1    │  errors, non-English
-        └────────┬─────────┘     └────────┬─────────┘
-                 ▼                        ▼
+        ┌──────────────────────────────────────────┐
+        │ Selected engine only                     │
+        │ Parakeet: Neural Engine, in-process       │
+        │ OR Whisper: local server, 127.0.0.1:18789 │
+        └────────┬─────────────────────────────────┘
+                 ▼
         words paste at the cursor
         clipboard is the failsafe
 ```
 
-You talk to one shortcut. Lowkey records 16 kHz PCM on this Mac and transcribes it on the Neural Engine, in-process. The transcript is cleaned (pause artifacts out, your vocabulary in) and delivered to the app that had focus. WezTerm receives it through its CLI; other apps receive a keystroke paste. If delivery will not land, Cmd+V still has the same text.
+You talk to one shortcut. Lowkey records 16 kHz PCM on this Mac and transcribes it locally with the selected engine. The transcript is cleaned (pause artifacts out, your vocabulary in) and delivered to the app that had focus. WezTerm receives it through its CLI; other apps receive a keystroke paste. If delivery will not land, Cmd+V still has the same text.
 
 Why the Neural Engine matters: on a working Mac the CPU and GPU are shared with everything else - builds, browsers, compositing - and dictation queues behind all of it. Running Parakeet through Core ML reduces reliance on the GPU for primary transcription; it does not guarantee constant latency under load.
 
@@ -105,7 +106,7 @@ Why the Neural Engine matters: on a working Mac the CPU and GPU are shared with 
 
 Audio and transcripts stay on the Mac.
 
-- Parakeet runs inside the app process. The Whisper fallback listens only on `127.0.0.1`. There is no account, no analytics, and no outbound call for transcription. The only downloads are the models themselves, fetched once from Hugging Face.
+- Parakeet runs inside the app process. The Whisper server listens only on `127.0.0.1`. There is no account, no analytics, and no outbound call for transcription. The only downloads are the models themselves, fetched once from Hugging Face.
 - `~/Library/Application Support/Lowkey/` is created mode `700`. History, config, and logs live there. They are not part of this repository.
 - Signing keys stay in Application Support. They are gitignored.
 - Hardened Runtime is on. The entitlements are microphone input and Apple Events for paste, nothing else.
@@ -114,7 +115,7 @@ Audio and transcripts stay on the Mac.
 
 - App: `~/Applications/Lowkey.app`
 - Parakeet model: `~/Library/Application Support/FluidAudio/Models/`
-- Whisper fallback model: `~/Library/Application Support/Lowkey/models/ggml-small.en-q5_1.bin`
+- Whisper model: `~/Library/Application Support/Lowkey/models/ggml-small.en-q5_1.bin`
 - Config: `~/Library/Application Support/Lowkey/config.json` (`"engine": "parakeet"` or `"whisper"`)
 - Logs: `~/Library/Application Support/Lowkey/logs/`
 
@@ -132,13 +133,19 @@ Accessibility to **Lowkey Development** to test recording and paste delivery.
 The run script reuses an existing Developer ID identity, when available, to
 keep those grants stable across rebuilds.
 
-The automated suite covers history ownership, fallback recovery, HTTP response
+Debug builds can render their own windows for visual review without Screen
+Recording permission. `LOWKEY_UI` opens a surface (`main`, `settings:<Page>`,
+`setup`, `flow-audit`), `LOWKEY_SNAPSHOT_DIR` writes a PNG of every visible
+window on a timer, and `LOWKEY_NO_PASTE=1` keeps a review run from typing into
+whichever app is in front.
+
+The automated suite covers history ownership, exclusive engine lifecycle, HTTP response
 validation, clipboard preservation, audio conversion, modifier handling, and
 process timeouts. Physical microphone capture, cross-app paste, and visual
 appearance still require interactive validation.
 
-For Auto detect or non-English dictation, select the language and a multilingual Whisper
-model in Settings > Dictation. An installed `ggml-small.bin`,
+For Auto detect or non-English dictation, select Whisper, the language, and a multilingual Whisper
+model in Settings > Dictation. Parakeet remains English-only and does not silently switch engines. An installed `ggml-small.bin`,
 `ggml-small-q5_1.bin`, or `ggml-base.bin` alongside the English model is selected
 automatically. The default English-only model cannot transcribe other languages.
 
@@ -182,7 +189,7 @@ xcrun notarytool store-credentials lowkey-notary \
 
 ## Credits
 
-Primary speech recognition is [NVIDIA Parakeet TDT v2](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) (CC-BY-4.0), run on the Apple Neural Engine through [FluidAudio](https://github.com/FluidInference/FluidAudio)'s CoreML conversion. Fallback recognition is [OpenAI Whisper](https://github.com/openai/whisper) (MIT) through [whisper.cpp](https://github.com/ggml-org/whisper.cpp) `whisper-server`.
+Primary speech recognition is [NVIDIA Parakeet TDT v2](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) (CC-BY-4.0), run on the Apple Neural Engine through [FluidAudio](https://github.com/FluidInference/FluidAudio)'s CoreML conversion. Whisper recognition is [OpenAI Whisper](https://github.com/openai/whisper) (MIT) through [whisper.cpp](https://github.com/ggml-org/whisper.cpp) `whisper-server`.
 
 Lowkey is an independent Mac app. It is not affiliated with NVIDIA, OpenAI, Fluid Inference, or whisper.cpp.
 

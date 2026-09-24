@@ -19,20 +19,6 @@ final class HistoryStore {
     private let limit = 80
     private(set) var items: [HistoryItem] = []
     private var listeners: [UUID: () -> Void] = [:]
-    private var legacyOnChange: UUID?
-
-    var onChange: (() -> Void)? {
-        get { nil }
-        set {
-            if let id = legacyOnChange {
-                stopObserving(id)
-                legacyOnChange = nil
-            }
-            if let newValue {
-                legacyOnChange = observe(newValue)
-            }
-        }
-    }
 
     @discardableResult
     func observe(_ handler: @escaping () -> Void) -> UUID {
@@ -95,17 +81,19 @@ final class HistoryStore {
         }
     }
 
-    func updateText(id: UUID, text: String) {
-        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
-        items[index].text = text
-        persist()
-    }
-
     func delete(id: UUID) {
         if let item = items.first(where: { $0.id == id }), let url = audioURL(for: item) {
             try? FileManager.default.removeItem(at: url)
         }
         items.removeAll { $0.id == id }
+        persist()
+    }
+
+    func clearAll() {
+        for item in items {
+            if let url = audioURL(for: item) { try? FileManager.default.removeItem(at: url) }
+        }
+        items = []
         persist()
     }
 
