@@ -3,24 +3,42 @@ import ApplicationServices
 import Darwin
 
 struct PasteTarget {
-    let pid: pid_t
-    let bundleIdentifier: String
-    let localizedName: String
+    // AppKit can identify a running application while reporting PID -1.
+    // Retain its identity so those apps work and a reused PID cannot match.
+    let application: NSRunningApplication?
     var weztermPaneID: String?
     var weztermSocket: String?
+
+    var pid: pid_t { application?.processIdentifier ?? 0 }
+    var bundleIdentifier: String { application?.bundleIdentifier ?? "" }
+    var localizedName: String { application?.localizedName ?? "" }
+
+    var isCurrentApplication: Bool {
+        application?.isEqual(NSRunningApplication.current) ?? false
+    }
+
+    var isValidDestination: Bool {
+        guard let application else { return false }
+        return !application.isTerminated && !isCurrentApplication
+    }
+
+    func matches(_ other: NSRunningApplication?) -> Bool {
+        guard let application, !application.isTerminated,
+              let other, !other.isTerminated else { return false }
+        return application.isEqual(other)
+    }
+
+    @discardableResult
+    func activate() -> Bool {
+        guard isValidDestination else { return false }
+        return application?.activate(options: []) ?? false
+    }
 
     // Deliberately cheap: no process spawns. This runs on the main thread the
     // instant recording starts. The wezterm pane, which needs a CLI call, is
     // resolved asynchronously afterwards or lazily at paste time.
     static func capture() -> PasteTarget {
-        let front = NSWorkspace.shared.frontmostApplication
-        return PasteTarget(
-            pid: front?.processIdentifier ?? 0,
-            bundleIdentifier: front?.bundleIdentifier ?? "",
-            localizedName: front?.localizedName ?? "",
-            weztermPaneID: nil,
-            weztermSocket: nil
-        )
+        PasteTarget(application: NSWorkspace.shared.frontmostApplication)
     }
 
     var isWezTerm: Bool {
@@ -71,12 +89,13 @@ enum PasteService {
 
         deliveryQueue.async {
             let destination = target ?? DispatchQueue.main.sync { PasteTarget.capture() }
-            log("insert len=\(text.count) app=\(destination.localizedName) pane=\(destination.weztermPaneID ?? "-") trusted=\(isTrusted()) clipboard=\(clipboard.rawValue)")
+            log("insert len=\(text.count) app=\(destination.localizedName) pid=\(destination.pid) pane=\(destination.weztermPaneID ?? "-") trusted=\(isTrusted()) clipboard=\(clipboard.rawValue)")
 
             // Always park the transcript on the clipboard first.
             let previous = DispatchQueue.main.sync { writeClipboard(text) }
 
-            guard destination.pid > 0, destination.pid != getpid() else {
+            guard destination.isValidDestination else {
+                log("destination unavailable, terminated, or is Lowkey; preserving transcript without typing")
                 finishOnMain(previous, clipboard: clipboard, expected: text, outcome: .failed, completion: completion)
                 return
             }
@@ -126,7 +145,7 @@ enum PasteService {
     }
 
     private static func destinationStillFocused(_ target: PasteTarget) -> Bool {
-        NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid
+        target.matches(NSWorkspace.shared.frontmostApplication)
     }
 
     enum PasteOutcome: String {

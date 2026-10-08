@@ -55,9 +55,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         captureExternalTarget()
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
-            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                  app.processIdentifier != getpid() else { return }
-            self?.lastExternalTarget = PasteTarget(pid: app.processIdentifier, bundleIdentifier: app.bundleIdentifier ?? "", localizedName: app.localizedName ?? "")
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            let target = PasteTarget(application: app)
+            guard target.isValidDestination else { return }
+            self?.lastExternalTarget = target
         }
         applyDockVisibility()
         applyLoginItem()
@@ -292,7 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             recordingConfig = config
             let focused = PasteTarget.capture()
-            pasteTarget = focused.pid == getpid() ? lastExternalTarget : focused
+            pasteTarget = focused.isCurrentApplication ? lastExternalTarget : focused
             flowBar.resetLevels()
             recordStartedAt = Date()
             // The mic starts before anything else so the first syllables are
@@ -367,9 +368,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         MediaPause.resumeIfNeeded()
         let duration = Date().timeIntervalSince(recordStartedAt ?? Date())
         let target = pasteTarget
-        if NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid(),
-           let target, target.pid != getpid() {
-            NSRunningApplication(processIdentifier: target.pid)?.activate(options: [])
+        if PasteTarget.capture().isCurrentApplication {
+            target?.activate()
         }
         let snapshot = recordingConfig ?? config
         transcriptionQueue.async { [weak self] in
@@ -787,15 +787,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func captureExternalTarget() {
         let target = PasteTarget.capture()
-        if target.pid != getpid(), target.pid > 0 { lastExternalTarget = target }
+        if target.isValidDestination { lastExternalTarget = target }
     }
 
     private func pasteHistoryText(_ text: String) {
         guard !busy, !recording else { return }
         busy = true
-        if let target = lastExternalTarget, let app = NSRunningApplication(processIdentifier: target.pid) {
-            app.activate(options: [])
-        }
+        lastExternalTarget?.activate()
         PasteService.insert(text, into: lastExternalTarget, clipboard: config.clipboardBehavior) { [weak self] outcome in
             self?.reportPaste(outcome)
             self?.finishOperation()
