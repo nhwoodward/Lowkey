@@ -145,11 +145,7 @@ struct Config: Codable, Equatable {
         ("zh", "Chinese"),
     ]
 
-    static var historyDirectory: URL {
-        let url = supportDirectory.appendingPathComponent("history", isDirectory: true)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
-    }
+    static var historyDirectory: URL { prepared(supportDirectory.appendingPathComponent("history", isDirectory: true)) }
 
     static let loopbackHost = "127.0.0.1"
 
@@ -158,12 +154,13 @@ struct Config: Codable, Equatable {
         // Development builds can run beside the installed app without sharing
         // preferences, recordings, history, or logs.
         if let path = ProcessInfo.processInfo.environment["LOWKEY_SUPPORT_DIRECTORY"], !path.isEmpty {
-            let url = URL(fileURLWithPath: path, isDirectory: true)
-            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
-            return url
+            return prepared(URL(fileURLWithPath: path, isDirectory: true), ownerOnly: true)
         }
         #endif
+        return installedSupportDirectory
+    }
+
+    private static let installedSupportDirectory: URL = {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let url = root.appendingPathComponent("Lowkey", isDirectory: true)
         let legacy = root.appendingPathComponent("Whisperly", isDirectory: true)
@@ -172,26 +169,28 @@ struct Config: Codable, Equatable {
             try? FileManager.default.moveItem(at: legacy, to: url)
             try? FileManager.default.removeItem(at: url.appendingPathComponent("signing", isDirectory: true))
         }
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
-        return url
-    }
+        return prepared(url, ownerOnly: true)
+    }()
 
-    static var modelsDirectory: URL {
-        let url = supportDirectory.appendingPathComponent("models", isDirectory: true)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
-    }
+    static var modelsDirectory: URL { prepared(supportDirectory.appendingPathComponent("models", isDirectory: true)) }
 
-    static var logsDirectory: URL {
-        let url = supportDirectory.appendingPathComponent("logs", isDirectory: true)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
-    }
+    static var logsDirectory: URL { prepared(supportDirectory.appendingPathComponent("logs", isDirectory: true)) }
 
-    static var tmpDirectory: URL {
-        let url = supportDirectory.appendingPathComponent("tmp", isDirectory: true)
+    static var tmpDirectory: URL { prepared(supportDirectory.appendingPathComponent("tmp", isDirectory: true)) }
+
+    // These paths are asked for constantly: once per history row, per log
+    // line, per recording. Each directory is created once per launch.
+    private static let preparedLock = NSLock()
+    private static var preparedPaths: Set<String> = []
+
+    private static func prepared(_ url: URL, ownerOnly: Bool = false) -> URL {
+        preparedLock.lock()
+        defer { preparedLock.unlock() }
+        guard preparedPaths.insert(url.path).inserted else { return url }
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        if ownerOnly {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+        }
         return url
     }
 

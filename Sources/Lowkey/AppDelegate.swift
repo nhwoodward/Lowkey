@@ -360,7 +360,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         tapWork?.cancel()
         tapWork = nil
         stopRecordingClock()
-        // Acknowledge release before microphone teardown and WAV/VAD work.
+        let released = CACurrentMediaTime()
+        // Acknowledge release before microphone teardown and the speech check.
         flowBar.setMode(.working)
         watchKeys(false)
         playCue(.stop)
@@ -368,39 +369,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         MediaPause.resumeIfNeeded()
         let duration = Date().timeIntervalSince(recordStartedAt ?? Date())
         let target = pasteTarget
-        if PasteTarget.capture().isCurrentApplication {
-            target?.activate()
-        }
+        let reactivated = PasteTarget.capture().isCurrentApplication
+        if reactivated { target?.activate() }
         let snapshot = recordingConfig ?? config
         transcriptionQueue.async { [weak self] in
             guard let self else { return }
-            do {
-                try self.recorder.finalizeOutput()
-            } catch {
-                DispatchQueue.main.async {
-                    self.finishOperation()
-                    AppLog.line("release save-failed")
-                    self.flowBar.setMode(.failed("Couldn't save the recording"))
-                }
-                return
-            }
-            let url = self.recorder.fileURL
-            let speech = self.recorder.containsSpeech
-            let energy = self.recorder.heardEnergy
-            AppLog.line("release speech=\(speech) energy=\(energy) url=\(url?.lastPathComponent ?? "-")")
+            let take = self.recorder.finish()
+            AppLog.line(String(format: "release speech=%@ energy=%@ audio=%.1fs",
+                               String(take.containsSpeech), String(take.heardEnergy), take.seconds))
             // If the wave moved, send the clip. The old VAD gate dropped
             // real speech after the bars had already reacted, then the bar
             // vanished with no loader and no text.
-            guard let url, speech || energy else {
+            guard take.containsSpeech || take.heardEnergy else {
                 DispatchQueue.main.async {
                     self.finishOperation()
                     self.restBar()
-                    if let url { try? FileManager.default.removeItem(at: url) }
                 }
                 return
             }
             do {
-                let outcome = try self.transcribeWithRecovery(fileURL: url, config: snapshot)
+                let outcome = try self.transcribeWithRecovery(.pcm(take.pcm), config: snapshot)
+                AppLog.line(String(format: "dictation timing release->text=%.0fms audio=%.1fs",
+                                   (CACurrentMediaTime() - released) * 1000, take.seconds))
                 DispatchQueue.main.async {
                     switch outcome {
                     case .silence:
@@ -410,12 +400,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         AppLog.line("release outcome=noise")
                         self.flowBar.setMode(.notice("Nothing heard", symbol: "waveform.slash"))
                     case .text(let text):
-                        HistoryStore.shared.add(
-                            text: text,
-                            duration: duration,
-                            language: snapshot.language,
-                            audioURL: url
-                        )
                         // Show the check as soon as text is ready. Paste used
                         // to hold the spinner open, which made translation
                         // look slower every time WezTerm CLI stalled.
@@ -423,7 +407,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         PasteService.insert(
                             text,
                             into: target,
-                            clipboard: snapshot.clipboardBehavior
+                            clipboard: snapshot.clipboardBehavior,
+                            afterActivation: reactivated,
+                            waitingSince: released
                         ) { outcome in
                             self.reportPaste(outcome)
                             self.finishOperation()
@@ -431,33 +417,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     }
                     if case .text = outcome {} else { self.finishOperation() }
                     self.refreshMenu()
-                    // Deleted here, after HistoryStore has copied
-                    // the file, so history playback keeps its audio.
-                    try? FileManager.default.removeItem(at: url)
+                }
+                // History is written behind the paste, never ahead of it.
+                if case .text(let text) = outcome {
+                    let url = Self.saveRecording(take)
+                    DispatchQueue.main.async {
+                        HistoryStore.shared.add(text: text, duration: duration, language: snapshot.language, audioURL: url)
+                        if let url { try? FileManager.default.removeItem(at: url) }
+                        self.refreshMenu()
+                    }
                 }
             } catch {
+                let kept = Self.saveRecording(take)
                 DispatchQueue.main.async {
                     self.finishOperation()
                     self.flowBar.setMode(.failed(Self.friendlyMessage(for: error)))
                     self.refreshMenu()
-                    AppLog.line("recording retained after transcription failure: \(url.lastPathComponent)")
+                    AppLog.line("recording retained after transcription failure: \(kept?.lastPathComponent ?? "not saved")")
                 }
             }
         }
     }
 
+    // History keeps its own copy of this file, so the caller deletes it.
+    private static func saveRecording(_ take: Recorder.Take) -> URL? {
+        let url = Config.tmpDirectory.appendingPathComponent(UUID().uuidString + ".wav")
+        do {
+            try Recorder.wav(from: take.pcm).write(to: url)
+            return url
+        } catch {
+            AppLog.line("recording not saved: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
     // Recovery is limited to the selected engine. An error must never load
     // a second model behind the user's selection.
-    private func transcribeWithRecovery(fileURL: URL, config: Config) throws -> TranscriptOutcome {
+    private func transcribeWithRecovery(_ source: AudioSource, config: Config) throws -> TranscriptOutcome {
         if let error = config.selectedEngineError { throw error }
         if config.engine == .parakeet {
-            return try Transcriber.transcribe(fileURL: fileURL, config: config)
+            return try Transcriber.transcribe(source, config: config)
         }
         let selected = config.whisperConfig
         guard engine.ensureReady(config: selected, timeout: 30) else {
             throw TranscriberError.server(engine.lastError ?? "Whisper is unavailable. Check Dictation settings.")
         }
-        return try Transcriber.transcribe(fileURL: fileURL, config: selected)
+        return try Transcriber.transcribe(source, config: selected)
     }
 
     private static func friendlyMessage(for error: Error) -> String {
@@ -490,9 +495,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         stopRecordingClock()
         watchKeys(false)
         MediaPause.resumeIfNeeded()
-        if let url = recorder.stop() {
-            try? FileManager.default.removeItem(at: url)
-        }
+        recorder.discard()
         restBar()
         finishOperation()
     }
@@ -544,6 +547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.finishRecording()
                 return
             }
+            if self.revealed { Transcriber.keepWarm(config: self.recordingConfig ?? self.config) }
             let remaining = left <= Self.countdownSeconds ? Int(left.rounded(.up)) : nil
             guard remaining != self.shownRemaining else { return }
             self.shownRemaining = remaining
@@ -743,7 +747,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             do {
                 let audio = try ImportedAudio.prepare(url)
                 prepared = audio
-                let outcome = try self.transcribeWithRecovery(fileURL: audio.url, config: snapshot)
+                let outcome = try self.transcribeWithRecovery(.file(audio.url), config: snapshot)
                 DispatchQueue.main.async {
                     switch outcome {
                     case .text(let text):
@@ -794,7 +798,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !busy, !recording else { return }
         busy = true
         lastExternalTarget?.activate()
-        PasteService.insert(text, into: lastExternalTarget, clipboard: config.clipboardBehavior) { [weak self] outcome in
+        PasteService.insert(text, into: lastExternalTarget, clipboard: config.clipboardBehavior, afterActivation: true) { [weak self] outcome in
             self?.reportPaste(outcome)
             self?.finishOperation()
         }
@@ -971,7 +975,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             (.notice("Downloading speech model…", symbol: "arrow.down.circle"), false, nil),
             (.notice("Allow microphone access, then try again", symbol: "mic"), false, nil),
             (.failed("Microphone access is off"), false, nil),
-            (.failed("Couldn't save the recording"), false, nil),
             (.failed("Whisper engine is not responding"), false, nil),
             (.failed("Whisper model not found at\n/Users/example/" + String(repeating: "Long model folder/", count: 12)), false, nil),
         ]

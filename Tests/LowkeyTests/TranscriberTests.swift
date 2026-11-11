@@ -9,7 +9,7 @@ final class TranscriberTests: XCTestCase {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".wav")
         try Data(count: 16044).write(to: file)
         defer { try? FileManager.default.removeItem(at: file) }
-        XCTAssertThrowsError(try Transcriber.transcribe(fileURL: file, config: config)) { error in
+        XCTAssertThrowsError(try Transcriber.transcribe(.file(file), config: config)) { error in
             guard case ParakeetError.notReady = error else {
                 return XCTFail("Expected the selected engine's error, got \(error)")
             }
@@ -24,7 +24,7 @@ final class TranscriberTests: XCTestCase {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".wav")
         try Data(count: 8044).write(to: file)
         defer { try? FileManager.default.removeItem(at: file) }
-        XCTAssertEqual(try Transcriber.transcribe(fileURL: file, config: config), .silence)
+        XCTAssertEqual(try Transcriber.transcribe(.file(file), config: config), .silence)
         #endif
     }
 

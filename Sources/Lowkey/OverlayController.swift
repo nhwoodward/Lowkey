@@ -9,7 +9,7 @@ enum FlowBarMode: Equatable {
 
 // A nonactivating panel keeps the insertion point in the app being dictated to.
 // AppKit owns the glass and controls; this controller owns only dictation state.
-final class FlowBarController {
+final class FlowBarController: NSObject {
     var onIdleTap: (() -> Void)?
     var onStop: (() -> Void)?
     var restingMode: FlowBarMode = .hidden
@@ -19,7 +19,7 @@ final class FlowBarController {
     private var glass: NSView?
     private var dismissWork: DispatchWorkItem?
     private var messageAction: (() -> Void)?
-    private var timer: Timer?
+    private var waveClock: CADisplayLink?
     private var levels = Array(repeating: CGFloat.zero, count: 18)
     private var incoming = Array(repeating: CGFloat.zero, count: 18)
     private var lastWaveTime: CFTimeInterval = 0
@@ -38,7 +38,7 @@ final class FlowBarController {
         if next != .listening { chrome.setListeningAccessory(handsFree: false, remaining: nil) }
         if next == .hidden {
             chrome.apply(.hidden)
-            stopTimer()
+            stopWaveClock()
             panel?.orderOut(nil)
             return
         }
@@ -47,7 +47,7 @@ final class FlowBarController {
             screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
         }
         chrome.apply(next, animated: previous != .hidden && !reducedMotion)
-        if next == .listening { startTimer() } else { stopTimer() }
+        if next == .listening { startWaveClock() } else { stopWaveClock() }
         panel?.ignoresMouseEvents = next == .working || next == .success
         updateFrame(animated: previous != .hidden)
         panel?.orderFrontRegardless()
@@ -121,28 +121,32 @@ final class FlowBarController {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    private func startTimer() {
-        guard timer == nil else { return }
+    // Follows the bar's own display: one step per refresh at that screen's
+    // rate, and none while the bar is not on screen.
+    private func startWaveClock() {
+        guard waveClock == nil else { return }
         lastWaveTime = CACurrentMediaTime()
-        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
-            guard let self, self.mode == .listening else { return }
-            let now = CACurrentMediaTime()
-            let elapsed = now - self.lastWaveTime
-            self.lastWaveTime = now
-            for i in self.levels.indices {
-                // Fast attack, gentle release. Use elapsed time so delayed frames
-                // catch up instead of adding another frame's worth of lag.
-                let response = self.incoming[i] > self.levels[i] ? 0.012 : 0.060
-                let blend = CGFloat(1 - exp(-elapsed / response))
-                self.levels[i] += (self.incoming[i] - self.levels[i]) * blend
-            }
-            self.chrome.waveform.bars = self.levels
-        }
-        self.timer = timer
-        RunLoop.main.add(timer, forMode: .common)
+        let clock = chrome.displayLink(target: self, selector: #selector(stepWave))
+        clock.add(to: .main, forMode: .common)
+        waveClock = clock
     }
 
-    private func stopTimer() { timer?.invalidate(); timer = nil }
+    private func stopWaveClock() { waveClock?.invalidate(); waveClock = nil }
+
+    @objc private func stepWave() {
+        guard mode == .listening else { return }
+        let now = CACurrentMediaTime()
+        let elapsed = now - lastWaveTime
+        lastWaveTime = now
+        for i in levels.indices {
+            // Fast attack, gentle release. Use elapsed time so delayed frames
+            // catch up instead of adding another frame's worth of lag.
+            let response = incoming[i] > levels[i] ? 0.012 : 0.060
+            let blend = CGFloat(1 - exp(-elapsed / response))
+            levels[i] += (incoming[i] - levels[i]) * blend
+        }
+        chrome.waveform.bars = levels
+    }
 
     private func build() {
         let panel = NSPanel(contentRect: .zero, styleMask: [.nonactivatingPanel, .borderless], backing: .buffered, defer: false)

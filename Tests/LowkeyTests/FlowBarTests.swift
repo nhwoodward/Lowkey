@@ -8,7 +8,7 @@ final class FlowBarTests: XCTestCase {
             let content = FlowBarContent(frame: .zero)
             let messages = [
                 "Nothing heard", "Discarded as noise", "Still working",
-                "Couldn't save the recording", "Whisper engine is not responding",
+                "Whisper engine is not responding",
                 "Enable Microphone in Settings > Privacy, then try again.",
                 "Paste couldn't finish. Your text is saved in History.",
                 "Paste couldn't finish. Your text is on the clipboard.",

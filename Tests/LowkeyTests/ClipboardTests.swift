@@ -21,6 +21,15 @@ final class ClipboardTests: XCTestCase {
         PasteService.restoreClipboard(empty, board: board)
         XCTAssertNil(board.string(forType: .string))
     }
+    func testSkipsSavingWhenNothingWillBeRestored() {
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        board.setString("Original", forType: .string)
+        let snapshot = PasteService.writeClipboard("Dictation", board: board, preserving: false)
+        XCTAssertTrue(snapshot.items.isEmpty)
+        XCTAssertEqual(board.string(forType: .string), "Dictation")
+        XCTAssertEqual(snapshot.writtenChangeCount, board.changeCount, "The paste guard still needs the change count")
+    }
     func testDoesNotOverwriteNewClipboardEvenWhenTextMatches() {
         let board = NSPasteboard.withUniqueName()
         defer { board.releaseGlobally() }
