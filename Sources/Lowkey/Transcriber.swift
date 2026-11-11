@@ -12,6 +12,12 @@ enum TranscriptOutcome: Equatable {
     case discardedNoise
 }
 
+// Live dictation hands over samples still in memory; an import is a WAV on disk.
+enum AudioSource {
+    case file(URL)
+    case pcm(Data)
+}
+
 enum Transcriber {
     private static let touchLock = NSLock()
     private static var lastEngineTouch = Date.distantPast
@@ -22,37 +28,30 @@ enum Transcriber {
         touchLock.unlock()
     }
 
+    // Called every moment of a shown recording. Parakeet cools within the
+    // length of a long dictation, so it is warmed again as needed; Whisper
+    // holds for minutes and is warmed once, in warmUp.
+    static func keepWarm(config: Config) {
+        if config.engine == .parakeet { ParakeetEngine.shared.warmUpIfIdle() }
+    }
+
     // Fired when recording STARTS: a tiny silent inference re-establishes the
     // keep-alive connection, revives the engine's Metal residency (released
     // after 180s idle), and absorbs any first-request-after-idle cost while
     // the user is still speaking. By release time the pipe is hot.
     static func warmUp(config: Config) {
-        // Parakeet stays resident on the Neural Engine; only the whisper
-        // HTTP path benefits from pre-heating.
-        guard config.engine == .whisper else { return }
+        guard config.engine == .whisper else {
+            ParakeetEngine.shared.warmUpIfIdle()
+            return
+        }
         touchLock.lock()
         let recent = Date().timeIntervalSince(lastEngineTouch) < 20
         if !recent { lastEngineTouch = Date() }
         touchLock.unlock()
         if recent { return }
 
-        // 0.2s of 16 kHz mono silence, built in memory: 44-byte WAV header
-        // plus 3200 zero samples.
-        let sampleBytes = 3200 * 2
-        var wav = Data()
-        wav.append(Data("RIFF".utf8))
-        wav.append(UInt32(36 + sampleBytes).littleEndianData)
-        wav.append(Data("WAVEfmt ".utf8))
-        wav.append(UInt32(16).littleEndianData)
-        wav.append(UInt16(1).littleEndianData)          // PCM
-        wav.append(UInt16(1).littleEndianData)          // mono
-        wav.append(UInt32(16000).littleEndianData)      // sample rate
-        wav.append(UInt32(32000).littleEndianData)      // byte rate
-        wav.append(UInt16(2).littleEndianData)          // block align
-        wav.append(UInt16(16).littleEndianData)         // bits
-        wav.append(Data("data".utf8))
-        wav.append(UInt32(sampleBytes).littleEndianData)
-        wav.append(Data(count: sampleBytes))
+        // 0.2s of 16 kHz mono silence, built in memory.
+        let wav = Recorder.wav(from: Data(count: 3200 * 2))
 
         let boundary = "Warm-\(UUID().uuidString)"
         var body = Data()
@@ -75,28 +74,43 @@ enum Transcriber {
         }.resume()
     }
 
-    static func transcribe(fileURL: URL, config: Config) throws -> TranscriptOutcome {
+    static func transcribe(_ source: AudioSource, config: Config) throws -> TranscriptOutcome {
         if let error = config.selectedEngineError { throw error }
         defer { touchEngine() }
         let started = Date()
-        let audio = try Data(contentsOf: fileURL)
-        guard audio.count >= 6444 else { return .silence }
+        // Sizes are those of the WAV file, header included.
+        let bytes: Int
+        switch source {
+        case .file(let url): bytes = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        case .pcm(let pcm): bytes = pcm.count + 44
+        }
+        guard bytes >= 6444 else { return .silence }
         // ~3 minutes of 16 kHz mono PCM plus a WAV header.
-        guard audio.count < 6_000_000 else {
-            AppLog.line("transcribe rejected oversized wav bytes=\(audio.count)")
+        guard bytes < 6_000_000 else {
+            AppLog.line("transcribe rejected oversized wav bytes=\(bytes)")
             throw TranscriberError.tooLarge
         }
 
         if config.engine == .parakeet {
             // FluidAudio requires at least 300 ms of 16 kHz PCM. A short tap
             // must not become an engine failure or wake another recognizer.
-            guard audio.count >= 9644 else { return .silence }
-            let raw = try ParakeetEngine.shared.transcribe(fileURL: fileURL)
+            guard bytes >= 9644 else { return .silence }
+            let raw: String
+            switch source {
+            case .file(let url): raw = try ParakeetEngine.shared.transcribe(fileURL: url)
+            case .pcm(let pcm): raw = try ParakeetEngine.shared.transcribe(pcm: pcm)
+            }
             let outcome = finish(raw, config: config)
             AppLog.line(String(
                 format: "transcribe ok=%.2fs bytes=%d outcome=%@ engine=parakeet",
-                Date().timeIntervalSince(started), audio.count, describe(outcome)))
+                Date().timeIntervalSince(started), bytes, describe(outcome)))
             return outcome
+        }
+
+        let audio: Data
+        switch source {
+        case .file(let url): audio = try Data(contentsOf: url)
+        case .pcm(let pcm): audio = Recorder.wav(from: pcm)
         }
 
         let boundary = "Boundary-\(UUID().uuidString)"
@@ -124,7 +138,7 @@ enum Transcriber {
         // short dictations pay a long clip's encode. Cropping the encoder
         // context to the real audio length (plus margin) cut short-clip
         // latency 1.6x in A/B with byte-identical text.
-        let seconds = Double(max(0, audio.count - 44)) / 32_000
+        let seconds = Double(max(0, bytes - 44)) / 32_000
         let audioCtx = max(128, Int((seconds / 30.0 * 1500).rounded(.up)) + 64)
         if audioCtx < 1500 {
             field("audio_ctx", String(audioCtx))
@@ -159,7 +173,7 @@ enum Transcriber {
         let raw = try reply.text()
         let outcome = finish(raw, config: config)
         AppLog.line(String(format: "transcribe ok=%.2fs bytes=%d outcome=%@ engine=whisper",
-                           Date().timeIntervalSince(started), audio.count, describe(outcome)))
+                           Date().timeIntervalSince(started), bytes, describe(outcome)))
         return outcome
     }
 

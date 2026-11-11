@@ -233,8 +233,11 @@ enum EngineError: LocalizedError {
 enum AppLog {
     private static let url = Config.logsDirectory.appendingPathComponent("app.log")
     private static let lock = NSLock()
+    // Milliseconds, so the stages of one dictation can be told apart.
     private static let stamp: ISO8601DateFormatter = {
-        ISO8601DateFormatter()
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
     }()
 
     static func line(_ message: String) {

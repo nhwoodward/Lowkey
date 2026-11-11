@@ -49,7 +49,7 @@ struct PasteTarget {
 enum PasteService {
     private static let logURL = Config.logsDirectory.appendingPathComponent("paste.log")
     private static let deliveryQueue = DispatchQueue(label: "app.lowkey.paste", qos: .userInitiated)
-    private static let prePasteDelay: TimeInterval = 0.10
+    private static let settleDelay: TimeInterval = 0.10
     private static let keyGap: useconds_t = 10_000
 
     static func promptAccessibilityIfNeeded() {
@@ -67,10 +67,14 @@ enum PasteService {
         }
     }
 
+    // `afterActivation` says the caller just brought the target forward.
+    // `waitingSince` is when the user's wait began, for the timing log.
     static func insert(
         _ text: String,
         into target: PasteTarget? = nil,
         clipboard: ClipboardBehavior,
+        afterActivation: Bool = false,
+        waitingSince: CFTimeInterval = CACurrentMediaTime(),
         completion: ((PasteOutcome) -> Void)? = nil
     ) {
         guard !text.isEmpty else {
@@ -91,8 +95,9 @@ enum PasteService {
             let destination = target ?? DispatchQueue.main.sync { PasteTarget.capture() }
             log("insert len=\(text.count) app=\(destination.localizedName) pid=\(destination.pid) pane=\(destination.weztermPaneID ?? "-") trusted=\(isTrusted()) clipboard=\(clipboard.rawValue)")
 
-            // Always park the transcript on the clipboard first.
-            let previous = DispatchQueue.main.sync { writeClipboard(text) }
+            // Always park the transcript on the clipboard first. What was
+            // there is saved only if this behavior can put it back.
+            let previous = DispatchQueue.main.sync { writeClipboard(text, preserving: clipboard != .always) }
 
             guard destination.isValidDestination else {
                 log("destination unavailable, terminated, or is Lowkey; preserving transcript without typing")
@@ -104,31 +109,32 @@ enum PasteService {
                 if let routing, let pane = destination.weztermPaneID,
                    destination.weztermSocket == routing.socket,
                    sendViaWezterm(text, pane: pane, routing: routing) {
-                    log("wezterm send-text pane=\(pane)")
+                    log("wezterm send-text pane=\(pane) wait=\(milliseconds(since: waitingSince))ms")
                     finishOnMain(previous, clipboard: clipboard, expected: text, outcome: .succeeded, completion: completion)
                     return
                 }
                 log("wezterm send-text failed, falling through to keystroke")
             }
 
-            Thread.sleep(forTimeInterval: prePasteDelay)
-            waitForModifiersToClear()
+            // An app that kept focus, with no modifier held, can take the
+            // keystroke at once. A target that was just brought forward, or
+            // a key the user has only now let go of, gets a moment to settle.
+            let heldModifiers = waitForModifiersToClear()
+            if afterActivation || heldModifiers || !destinationStillFocused(destination) {
+                Thread.sleep(forTimeInterval: settleDelay)
+            }
 
-            // Probe only on the keystroke path, where the answer is actually
-            // consumed, and only from this background thread. paste.log showed
-            // 6-7s freezes when this ran under DispatchQueue.main.sync: the AX
-            // round trip to WezTerm hit its 6s default timeout while the main
-            // thread sat blocked.
             guard destinationStillFocused(destination) else {
                 log("destination changed; preserving transcript without typing")
                 finishOnMain(previous, clipboard: clipboard, expected: text, outcome: .failed, completion: completion)
                 return
             }
-            let focus = FocusedField.probe()
 
-            // PASTE CONTRACT: never skip the keystroke because a probe
-            // failed. AX lies for WezTerm, Zen, Notes, and Chromium.
-            // Clipboard is already filled. Worst case the user Cmd+V.
+            // PASTE CONTRACT: the keystroke never waits on, or is skipped
+            // because of, an accessibility probe. AX lies for WezTerm, Zen,
+            // Notes, and Chromium, and an app that ignores it holds each call
+            // until the timeout. Clipboard is already filled. Worst case the
+            // user Cmd+V.
             var outcome = PasteOutcome.failed
             if isTrusted() {
                 let sent = DispatchQueue.main.sync { () -> Bool in
@@ -137,7 +143,10 @@ enum PasteService {
                     pasteFromClipboardVoiceInk()
                     return true
                 }
-                if sent { outcome = detectKeystrokeOutcome(before: focus.value, text: text) }
+                if sent {
+                    log("keystroke sent wait=\(milliseconds(since: waitingSince))ms")
+                    outcome = detectKeystrokeOutcome(text: text)
+                }
             }
 
             finishOnMain(previous, clipboard: clipboard, expected: text, outcome: outcome, completion: completion)
@@ -165,7 +174,15 @@ enum PasteService {
         }
     }
 
-    private static func detectKeystrokeOutcome(before: String?, text: String) -> PasteOutcome {
+    private static func milliseconds(since start: CFTimeInterval) -> Int {
+        Int(((CACurrentMediaTime() - start) * 1000).rounded())
+    }
+
+    // Probe only after the keystroke, and only from this background thread.
+    // paste.log showed 6-7s freezes when a probe ran under
+    // DispatchQueue.main.sync: the AX round trip to WezTerm hit its 6s
+    // default timeout while the main thread sat blocked.
+    private static func detectKeystrokeOutcome(text: String) -> PasteOutcome {
         Thread.sleep(forTimeInterval: 0.08)
         let after = FocusedField.probe()
         guard after.hasFocus, let value = after.value else {
@@ -269,9 +286,11 @@ enum PasteService {
         let writtenChangeCount: Int
     }
 
+    // Saving reads every representation of whatever is on the clipboard,
+    // which can be large. Pass `preserving: false` when it will not be restored.
     @discardableResult
-    static func writeClipboard(_ text: String, board: NSPasteboard = .general) -> ClipboardSnapshot {
-        let saved = (board.pasteboardItems ?? []).map { item in
+    static func writeClipboard(_ text: String, board: NSPasteboard = .general, preserving: Bool = true) -> ClipboardSnapshot {
+        let saved = !preserving ? [] : (board.pasteboardItems ?? []).map { item in
             Dictionary(uniqueKeysWithValues: item.types.compactMap { type in item.data(forType: type).map { (type, $0) } })
         }
         let transient = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
@@ -309,15 +328,20 @@ enum PasteService {
         } else { completion?(outcome) }
     }
 
-    private static func waitForModifiersToClear() {
+    // Returns whether a modifier was down when the wait began.
+    @discardableResult
+    private static func waitForModifiersToClear() -> Bool {
         let deadline = Date().addingTimeInterval(1.0)
+        var held = false
         while Date() < deadline {
             let ns = NSEvent.modifierFlags.intersection([.command, .option, .shift, .control])
             let cg = CGEventSource.flagsState(.combinedSessionState)
                 .intersection([.maskCommand, .maskAlternate, .maskShift, .maskControl])
-            if ns.isEmpty && cg.isEmpty { return }
+            if ns.isEmpty && cg.isEmpty { return held }
+            held = true
             Thread.sleep(forTimeInterval: 0.025)
         }
+        return held
     }
 
     private static func pasteFromClipboardVoiceInk() {

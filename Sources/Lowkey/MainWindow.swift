@@ -14,6 +14,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     private var searchItem: NSSearchToolbarItem?
     private var historyObserver: UUID?
     private var busy = false
+    private var stale = false
 
     private static let importID = NSToolbarItem.Identifier("import")
     private static let searchID = NSToolbarItem.Identifier("search")
@@ -63,7 +64,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         window.onFind = { [weak self] in self?.searchItem?.beginSearchInteraction() }
         model.onPaste = { [weak self] item in self?.onPasteItem?(item) }
         model.pasteTargetName = { [weak self] in self?.pasteTargetName?() }
-        historyObserver = HistoryStore.shared.observe { [weak self] in self?.model.reload() }
+        historyObserver = HistoryStore.shared.observe { [weak self] in self?.historyChanged() }
         #if DEBUG
         stageDemo()
         #endif
@@ -88,8 +89,25 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     // Day titles are relative, so refresh them whenever the window comes back.
     override func showWindow(_ sender: Any?) {
+        stale = false
         model.reload()
         super.showWindow(sender)
+    }
+
+    // Most dictations happen with this window closed, hidden, or covered.
+    // It catches up when it can next be seen.
+    private func historyChanged() {
+        guard window?.occlusionState.contains(.visible) == true else {
+            stale = true
+            return
+        }
+        model.reload()
+    }
+
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        guard stale, window?.occlusionState.contains(.visible) == true else { return }
+        stale = false
+        model.reload()
     }
 
     func windowWillClose(_ notification: Notification) {

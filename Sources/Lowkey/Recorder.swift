@@ -3,6 +3,14 @@ import AVFoundation
 import Foundation
 
 final class Recorder {
+    // A finished recording, still in memory: 16 kHz mono 16-bit PCM.
+    struct Take {
+        let pcm: Data
+        let containsSpeech: Bool
+        let heardEnergy: Bool
+        var seconds: Double { Double(pcm.count) / 32_000 }
+    }
+
     var onWave: (([CGFloat]) -> Void)?
     // 20 ms of mono 16-bit audio at 16 kHz. Keep capture and meter updates
     // frequent enough that a new syllable appears without waiting 64 ms.
@@ -13,9 +21,7 @@ final class Recorder {
     private var pcm = Data()
     private let pcmLock = NSLock()
     private var wave = Array(repeating: CGFloat(0), count: 18)
-    private(set) var containsSpeech = false
-    private(set) var heardEnergy = false
-    private(set) var fileURL: URL?
+    private var heardEnergy = false
     private var isCapturing = false
     fileprivate var running: Bool {
         get { pcmLock.withLock { isCapturing } }
@@ -23,16 +29,8 @@ final class Recorder {
     }
 
     func start(deviceUID: String? = nil) throws {
-        stopCapture()
-        pcmLock.lock()
-        pcm = Data()
-        pcmLock.unlock()
-        containsSpeech = false
-        heardEnergy = false
+        discard()
         wave = Array(repeating: 0, count: 18)
-        let url = Config.tmpDirectory.appendingPathComponent(UUID().uuidString + ".wav")
-        try? FileManager.default.removeItem(at: url)
-        fileURL = url
         try startQueue(deviceUID: deviceUID)
     }
 
@@ -40,25 +38,26 @@ final class Recorder {
         stopCapture()
     }
 
-    @discardableResult
-    func stop() -> URL? {
+    // Drops a cancelled take. Nothing was written, so there is nothing to clean up.
+    func discard() {
         stopCapture()
-        try? finalizeOutput()
-        return fileURL
+        _ = takeSamples()
     }
 
-    func finalizeOutput() throws {
+    // Hands over what was captured. Call after releaseMic, off the main thread:
+    // the speech check walks every sample.
+    func finish() -> Take {
+        let (samples, energy) = takeSamples()
+        return Take(pcm: samples, containsSpeech: detectSpeech(in: samples), heardEnergy: energy)
+    }
+
+    private func takeSamples() -> (Data, Bool) {
         pcmLock.lock()
-        let samples = pcm
-        pcmLock.unlock()
-        if let fileURL, !samples.isEmpty {
-            do {
-                try writeWav(samples, to: fileURL)
-            } catch {
-                throw RecorderError.saveFailed
-            }
-        }
-        containsSpeech = detectSpeech(in: samples)
+        defer { pcmLock.unlock() }
+        let taken = (pcm, heardEnergy)
+        pcm = Data()
+        heardEnergy = false
+        return taken
     }
 
     private func startQueue(deviceUID: String?) throws {
@@ -125,9 +124,8 @@ final class Recorder {
         let byteCount = Int(buffer.pointee.mAudioDataByteSize)
         let data = buffer.pointee.mAudioData
         guard byteCount > 0 else { return }
-        let chunk = Data(bytes: data, count: byteCount)
         pcmLock.lock()
-        pcm.append(chunk)
+        pcm.append(data.assumingMemoryBound(to: UInt8.self), count: byteCount)
         pcmLock.unlock()
 
         let sampleCount = byteCount / 2
@@ -152,7 +150,7 @@ final class Recorder {
         if wave.count > 18 { wave = Array(wave.suffix(18)) }
         while wave.count < 18 { wave.insert(0, at: 0) }
         if fresh.contains(where: { $0 >= 0.12 }) {
-            heardEnergy = true
+            pcmLock.withLock { heardEnergy = true }
         }
         let snapshot = wave
         DispatchQueue.main.async { [weak self] in
@@ -214,30 +212,23 @@ final class Recorder {
         return speechFrames >= 8
     }
 
-    private func writeWav(_ samples: Data, to url: URL) throws {
-        var data = Data()
-        func put32(_ value: UInt32) {
-            var little = value.littleEndian
-            data.append(Data(bytes: &little, count: 4))
-        }
-        func put16(_ value: UInt16) {
-            var little = value.littleEndian
-            data.append(Data(bytes: &little, count: 2))
-        }
-        data.append(contentsOf: Array("RIFF".utf8))
-        put32(UInt32(36 + samples.count))
-        data.append(contentsOf: Array("WAVEfmt ".utf8))
-        put32(16)
-        put16(1)
-        put16(1)
-        put32(16_000)
-        put32(32_000)
-        put16(2)
-        put16(16)
-        data.append(contentsOf: Array("data".utf8))
-        put32(UInt32(samples.count))
-        data.append(samples)
-        try data.write(to: url, options: .atomic)
+    // The samples as a WAV file: what Whisper is sent and what History keeps.
+    static func wav(from pcm: Data) -> Data {
+        var data = Data(capacity: 44 + pcm.count)
+        data.append(Data("RIFF".utf8))
+        data.append(UInt32(36 + pcm.count).littleEndianData)
+        data.append(Data("WAVEfmt ".utf8))
+        data.append(UInt32(16).littleEndianData)
+        data.append(UInt16(1).littleEndianData)          // PCM
+        data.append(UInt16(1).littleEndianData)          // mono
+        data.append(UInt32(16_000).littleEndianData)     // sample rate
+        data.append(UInt32(32_000).littleEndianData)     // byte rate
+        data.append(UInt16(2).littleEndianData)          // block align
+        data.append(UInt16(16).littleEndianData)         // bits
+        data.append(Data("data".utf8))
+        data.append(UInt32(pcm.count).littleEndianData)
+        data.append(pcm)
+        return data
     }
 }
 
@@ -259,11 +250,9 @@ private func recorderCallback(
 
 enum RecorderError: LocalizedError {
     case failedToStart
-    case saveFailed
     var errorDescription: String? {
         switch self {
         case .failedToStart: return "Could not start the microphone."
-        case .saveFailed: return "Couldn't save the recording."
         }
     }
 }
